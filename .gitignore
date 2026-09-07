@@ -1,0 +1,6 @@
+.gradle/
+build/
+app/build/
+*.iml
+analysis/
+raw/
