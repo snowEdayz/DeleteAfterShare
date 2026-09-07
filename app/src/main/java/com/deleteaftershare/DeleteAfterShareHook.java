@@ -26,7 +26,6 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.AndroidAppHelper;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
@@ -985,8 +984,8 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
     private static void notifyScreenshotDeletionComplete(
             Uri originUri, DexKitResolver.GalleryBindings bindings) {
         try {
-            Context application = AndroidAppHelper.currentApplication();
-            if (application == null && bindings.appContext != null) {
+            Context application = null;
+            if (bindings.appContext != null) {
                 Object contextValue = bindings.appContext.field.get(null);
                 application = contextValue instanceof Context
                         ? ((Context) contextValue).getApplicationContext()
