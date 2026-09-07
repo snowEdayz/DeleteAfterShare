@@ -1,10 +1,13 @@
 package com.deleteaftershare;
 
+import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.Collections;
@@ -40,8 +43,13 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             Collections.synchronizedMap(new WeakHashMap<Object, Uri>());
     private static final Map<Object, String> GALLERY_MODEL_ORIGINS =
             Collections.synchronizedMap(new WeakHashMap<Object, String>());
+    private static final Map<Object, WeakReference<Object>> GALLERY_MODEL_ACTIVITIES =
+            Collections.synchronizedMap(new WeakHashMap<Object, WeakReference<Object>>());
     private static final Object CURRENT_GALLERY_ORIGIN_LOCK = new Object();
     private static String currentGalleryOrigin;
+    private static final Object PENDING_DELETE_LOCK = new Object();
+    private static Uri pendingDeleteOrigin;
+    private static WeakReference<Object> pendingDeleteActivity;
 
     private static final ThreadLocal<ArrayDeque<PendingOrigin>> PENDING_ORIGINS =
             new ThreadLocal<ArrayDeque<PendingOrigin>>() {
@@ -247,6 +255,36 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             logFailure("hook ShareInnerViewModel.m33828e0", throwable);
         }
 
+        // If LocalSource is still catching up when m33828e0 runs, retry the
+        // conversion at the exact point Gallery flushes its existing queue.
+        try {
+            Class<?> shareUtils = XposedHelpers.findClass(
+                    "com.oplus.gallery.business_lib.util.ShareUtils", classLoader);
+            XposedHelpers.findAndHookMethod(
+                    shareUtils,
+                    "m29558c",
+                    Boolean.TYPE,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (param.args.length > 0
+                                    && Boolean.TRUE.equals(param.args[0])) {
+                                retryPendingOriginalAtQueueFlush(classLoader);
+                            }
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.args.length > 0
+                                    && Boolean.TRUE.equals(param.args[0])) {
+                                clearPendingDelete();
+                            }
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook ShareUtils.m29558c", throwable);
+        }
+
         XposedBridge.log(TAG + ": Gallery hooks installed");
     }
 
@@ -277,9 +315,12 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         }
 
         Set<?> selectedItems = (Set<?>) param.args[0];
+        Object modelActivity = getModelActivity(param.thisObject);
+        armPendingDelete(originUri, modelActivity);
         Intent shareIntent = getViewModelShareIntent(param.thisObject);
         String mimeType = shareIntent == null ? null : shareIntent.getType();
-        Object originPath = resolveGalleryPath(classLoader, originUri, mimeType);
+        Object originPath = resolveGalleryPath(
+                classLoader, modelActivity, originUri, mimeType);
         if (originPath == null) {
             XposedBridge.log(TAG + ": Gallery could not resolve original URI " + originUri);
             return;
@@ -327,6 +368,62 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
     }
 
     private static Object resolveGalleryPath(
+            ClassLoader classLoader, Object activity, Uri originUri, String mimeType) {
+        Object path = resolvePathFromDataManager(classLoader, originUri, mimeType);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        // f86 falls through to the generic /uri source when LocalSource has
+        // not loaded the MediaStore row yet. That path is shareable, but the
+        // Gallery recycle helper deliberately does not turn it into delete SQL.
+        // Only accept a real local item path here.
+        if (!isMediaUri(originUri)) {
+            return null;
+        }
+
+        path = resolvePathFromLocalMediaItem(classLoader, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        path = resolvePathFromShareActivity(activity, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        // Keep the same Gallery data source and ask it to refresh the row
+        // before trying the conversion again. This is needed when the
+        // original image was saved before Gallery's local DB caught up.
+        requestMediaSync(classLoader, originUri);
+        path = resolvePathFromDataManager(classLoader, originUri, null);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        path = resolvePathFromLocalMediaItem(classLoader, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        path = resolvePathFromShareActivity(activity, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        // Last fallback for builds where the local DB has the file path but
+        // has not exposed the MediaStore URI through DataManager yet.
+        path = resolvePathFromMediaStore(classLoader, activity, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        XposedBridge.log(TAG + ": original URI did not resolve to a local Gallery item: "
+                + originUri);
+        return null;
+    }
+
+    private static Object resolvePathFromDataManager(
             ClassLoader classLoader, Uri originUri, String mimeType) {
         try {
             Class<?> dataManager = Class.forName(
@@ -339,8 +436,192 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             }
             return path;
         } catch (Throwable throwable) {
-            logFailure("resolve original URI in Gallery DataManager", throwable);
+            XposedBridge.log(TAG + ": resolve original URI in Gallery DataManager failed: "
+                    + throwable);
             return null;
+        }
+    }
+
+    private static Object resolvePathFromLocalMediaItem(ClassLoader classLoader, Uri originUri) {
+        try {
+            Class<?> localMediaHelper = Class.forName(
+                    "com.oplus.aiunit.vision.ukd", false, classLoader);
+            Method preload = localMediaHelper.getDeclaredMethod("m24030o", Uri.class);
+            preload.setAccessible(true);
+            Object mediaItem = preload.invoke(null, originUri);
+            return getMediaObjectPath(mediaItem);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object resolvePathFromShareActivity(Object activity, Uri originUri) {
+        if (activity == null) {
+            return null;
+        }
+
+        try {
+            long mediaId = ContentUris.parseId(originUri);
+            Method queryByMediaId = findMethod(
+                    activity.getClass(), "m33733S0", Long.TYPE, Uri.class);
+            if (queryByMediaId == null) {
+                return null;
+            }
+            queryByMediaId.setAccessible(true);
+            Object mediaItem = queryByMediaId.invoke(activity, Long.valueOf(mediaId), originUri);
+            return getMediaObjectPath(mediaItem);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object resolvePathFromMediaStore(
+            ClassLoader classLoader, Object activity, Uri originUri) {
+        if (!(activity instanceof Context)) {
+            return null;
+        }
+
+        Cursor cursor = null;
+        try {
+            cursor = ((Context) activity).getContentResolver().query(
+                    originUri, new String[]{"_data"}, null, null, null);
+            if (cursor == null || !cursor.moveToFirst()) {
+                return null;
+            }
+            int dataIndex = cursor.getColumnIndex("_data");
+            if (dataIndex < 0) {
+                return null;
+            }
+            String filePath = cursor.getString(dataIndex);
+            if (filePath == null || filePath.length() == 0) {
+                return null;
+            }
+
+            Class<?> localMediaHelper = Class.forName(
+                    "com.oplus.aiunit.vision.ukd", false, classLoader);
+            Method pathFromFile = localMediaHelper.getDeclaredMethod(
+                    "m24026k", String.class);
+            pathFromFile.setAccessible(true);
+            return pathFromFile.invoke(null, filePath);
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            if (cursor != null) {
+                try {
+                    cursor.close();
+                } catch (Throwable ignored) {
+                    // Ignore a vendor cursor close failure.
+                }
+            }
+        }
+    }
+
+    private static void requestMediaSync(ClassLoader classLoader, Uri originUri) {
+        try {
+            long mediaId = ContentUris.parseId(originUri);
+            Class<?> mediaSync = Class.forName(
+                    "com.oplus.aiunit.vision.xj1", false, classLoader);
+            Object syncManager = XposedHelpers.callStaticMethod(mediaSync, "m25990i");
+            if (syncManager != null) {
+                XposedHelpers.callMethod(
+                        syncManager, "mo28749l", (Object) new long[]{mediaId});
+            }
+        } catch (Throwable throwable) {
+            XposedBridge.log(TAG + ": request Gallery media DB refresh failed: " + throwable);
+        }
+    }
+
+    private static Method findMethod(Class<?> type, String name, Class<?>... parameterTypes) {
+        Class<?> current = type;
+        while (current != null) {
+            try {
+                return current.getDeclaredMethod(name, parameterTypes);
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    private static Object getMediaObjectPath(Object mediaItem) {
+        if (mediaItem == null) {
+            return null;
+        }
+        try {
+            return XposedHelpers.getObjectField(mediaItem, "f60319b");
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isMediaUri(Uri uri) {
+        return uri != null
+                && "content".equals(uri.getScheme())
+                && "media".equals(uri.getAuthority());
+    }
+
+    private static boolean isLocalItemPath(Object path) {
+        if (path == null) {
+            return false;
+        }
+        String value = String.valueOf(path);
+        return value.startsWith("/local/item/image/")
+                || value.startsWith("/local/item/video/");
+    }
+
+    private static void armPendingDelete(Uri originUri, Object activity) {
+        synchronized (PENDING_DELETE_LOCK) {
+            pendingDeleteOrigin = originUri;
+            pendingDeleteActivity = activity == null
+                    ? null
+                    : new WeakReference<Object>(activity);
+        }
+    }
+
+    private static void retryPendingOriginalAtQueueFlush(ClassLoader classLoader) {
+        Uri originUri;
+        Object activity;
+        synchronized (PENDING_DELETE_LOCK) {
+            originUri = pendingDeleteOrigin;
+            activity = pendingDeleteActivity == null ? null : pendingDeleteActivity.get();
+        }
+        if (originUri == null) {
+            return;
+        }
+
+        Object originPath = resolveGalleryPath(classLoader, activity, originUri, null);
+        if (!isLocalItemPath(originPath)) {
+            XposedBridge.log(TAG + ": original still has no local Gallery path at queue flush: "
+                    + originUri);
+            return;
+        }
+
+        try {
+            Class<?> shareUtils = Class.forName(
+                    "com.oplus.gallery.business_lib.util.ShareUtils", false, classLoader);
+            Object queueObject = XposedHelpers.getStaticObjectField(shareUtils, "f61533b");
+            if (!(queueObject instanceof java.util.List)) {
+                return;
+            }
+            java.util.List<?> queue = (java.util.List<?>) queueObject;
+            synchronized (queue) {
+                if (!queue.contains(originPath)) {
+                    @SuppressWarnings("unchecked")
+                    java.util.List<Object> mutableQueue =
+                            (java.util.List<Object>) queueObject;
+                    mutableQueue.add(originPath);
+                    XposedBridge.log(TAG + ": original added during Gallery queue flush");
+                }
+            }
+        } catch (Throwable throwable) {
+            logFailure("retry original at Gallery queue flush", throwable);
+        }
+    }
+
+    private static void clearPendingDelete() {
+        synchronized (PENDING_DELETE_LOCK) {
+            pendingDeleteOrigin = null;
+            pendingDeleteActivity = null;
         }
     }
 
@@ -388,7 +669,16 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             GALLERY_MODEL_ORIGINS.put(viewModel, origin);
         } else {
             GALLERY_MODEL_ORIGINS.remove(viewModel);
+            GALLERY_MODEL_ACTIVITIES.remove(viewModel);
         }
+        if (origin != null && activity != null) {
+            GALLERY_MODEL_ACTIVITIES.put(viewModel, new WeakReference<Object>(activity));
+        }
+    }
+
+    private static Object getModelActivity(Object viewModel) {
+        WeakReference<Object> reference = GALLERY_MODEL_ACTIVITIES.get(viewModel);
+        return reference == null ? null : reference.get();
     }
 
     private static String getModelOrigin(Object viewModel) {
