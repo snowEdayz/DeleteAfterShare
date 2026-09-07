@@ -1,0 +1,992 @@
+package com.deleteaftershare;
+
+import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.ContentUris;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+
+import java.lang.ref.WeakReference;
+import java.util.ArrayDeque;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
+
+import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+/**
+ * Xposed Legacy entry point for the supplied Oplus Screenshot/Gallery builds.
+ *
+ * The Screenshot process puts the original URI on the Gallery share Intent.
+ * The Gallery process adds the corresponding Gallery path only to the argument
+ * used by its existing delete-after-share queue. The actual share Intent and
+ * Gallery selection remain unchanged.
+ */
+public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
+    private static final String SCREENSHOT_PACKAGE = "com.oplus.screenshot";
+    private static final String GALLERY_PACKAGE = "com.coloros.gallery3d";
+
+    private static final String EXTRA_ORIGIN_URI =
+            "com.deleteaftershare.extra.ORIGIN_URI";
+    private static final String ACTION_DELETE_COMPLETE =
+            "com.deleteaftershare.action.DELETE_COMPLETE";
+    private static final String EXTRA_DELETE_ORIGIN =
+            "com.deleteaftershare.extra.DELETE_ORIGIN";
+
+    private static final Map<Object, Uri> SEND_ORIGINS =
+            Collections.synchronizedMap(new WeakHashMap<Object, Uri>());
+    private static final Map<Object, BroadcastReceiver> EDITOR_ACTIVITY_RECEIVERS =
+            Collections.synchronizedMap(new WeakHashMap<Object, BroadcastReceiver>());
+    private static final Map<Object, String> EDITOR_ACTIVITY_ORIGINS =
+            Collections.synchronizedMap(new WeakHashMap<Object, String>());
+    private static final Map<Object, String> GALLERY_MODEL_ORIGINS =
+            Collections.synchronizedMap(new WeakHashMap<Object, String>());
+    private static final Map<Object, WeakReference<Object>> GALLERY_MODEL_ACTIVITIES =
+            Collections.synchronizedMap(new WeakHashMap<Object, WeakReference<Object>>());
+    private static final Object CURRENT_GALLERY_ORIGIN_LOCK = new Object();
+    private static String currentGalleryOrigin;
+    private static final Object PENDING_DELETE_LOCK = new Object();
+    private static Uri pendingDeleteOrigin;
+    private static WeakReference<Object> pendingDeleteActivity;
+    private static Object pendingDeletePath;
+
+    private static boolean screenshotHooksInstalled;
+    private static boolean galleryHooksInstalled;
+
+    private static final ThreadLocal<ArrayDeque<PendingOrigin>> PENDING_ORIGINS =
+            new ThreadLocal<ArrayDeque<PendingOrigin>>() {
+                @Override
+                protected ArrayDeque<PendingOrigin> initialValue() {
+                    return new ArrayDeque<PendingOrigin>();
+                }
+            };
+
+    @Override
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+        if (!SCREENSHOT_PACKAGE.equals(lpparam.packageName)
+                && !GALLERY_PACKAGE.equals(lpparam.packageName)) {
+            return;
+        }
+
+        if (lpparam.appInfo == null || lpparam.appInfo.sourceDir == null) {
+            logFailure("read target APK path", null);
+            return;
+        }
+
+        if (SCREENSHOT_PACKAGE.equals(lpparam.packageName)) {
+            installScreenshotHooks(lpparam.classLoader, lpparam.appInfo.sourceDir);
+        } else {
+            installGalleryHooks(lpparam.classLoader, lpparam.appInfo.sourceDir);
+        }
+    }
+
+    private static synchronized void installScreenshotHooks(
+            final ClassLoader classLoader, String apkPath) {
+        if (screenshotHooksInstalled) {
+            return;
+        }
+
+        final Class<?> editorActivity;
+        try {
+            editorActivity = XposedHelpers.findClass(
+                    "com.oplus.screenshot.editor.activity.EditorActivity", classLoader);
+        } catch (Throwable throwable) {
+            logFailure("locate Screenshot classes", throwable);
+            return;
+        }
+
+        final DexKitResolver.ScreenshotBindings bindings =
+                DexKitResolver.resolveScreenshot(apkPath, classLoader);
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    editorActivity,
+                    "onCreate",
+                    Bundle.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            registerEditorActivityReceiver(param.thisObject);
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook EditorActivity.onCreate", throwable);
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    editorActivity,
+                    "onDestroy",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            unregisterEditorActivityReceiver(param.thisObject);
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook EditorActivity.onDestroy", throwable);
+        }
+
+        hookMethod(
+                "Screenshot GalleryStartHelper factory",
+                bindings.galleryFactory,
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        PendingOrigin pending = peekPendingOrigin();
+                        Object send = param.getResult();
+                        if (pending != null && pending.uri != null && send != null) {
+                            SEND_ORIGINS.put(send, pending.uri);
+                        }
+                    }
+                });
+
+        hookMethod(
+                "Screenshot SendMenuAction share action",
+                bindings.sendAction,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        Uri origin = readScreenshotOrigin(param.thisObject, bindings);
+                        Object activity = getActionActivity(param.thisObject, bindings);
+                        if (origin != null && activity != null) {
+                            rememberEditorActivityOrigin(activity, origin);
+                            registerEditorActivityReceiver(activity);
+                        }
+                        PENDING_ORIGINS.get().push(new PendingOrigin(origin));
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        ArrayDeque<PendingOrigin> stack = PENDING_ORIGINS.get();
+                        if (!stack.isEmpty()) {
+                            stack.pop();
+                        }
+                        if (stack.isEmpty()) {
+                            PENDING_ORIGINS.remove();
+                        }
+                    }
+                });
+
+        hookMethod(
+                "Screenshot GalleryStartHelper.Send intent builder",
+                bindings.sendIntent,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        Uri origin = SEND_ORIGINS.get(param.thisObject);
+                        Intent intent = param.args.length > 0 && param.args[0] instanceof Intent
+                                ? (Intent) param.args[0]
+                                : null;
+                        if (origin != null && intent != null) {
+                            intent.putExtra(EXTRA_ORIGIN_URI, origin.toString());
+                        }
+                    }
+                });
+
+        screenshotHooksInstalled = true;
+        ModuleLog.log("Screenshot hooks installed");
+    }
+
+    private static Object getActionActivity(
+            Object action, DexKitResolver.ScreenshotBindings bindings) {
+        try {
+            if (bindings.actionActivity == null) {
+                return null;
+            }
+            Object value = invoke(bindings.actionActivity, action);
+            return value instanceof Activity ? value : null;
+        } catch (Throwable throwable) {
+            logFailure("read EditorActivity from SendMenuAction", throwable);
+            return null;
+        }
+    }
+
+    private static void rememberEditorActivityOrigin(Object activity, Uri origin) {
+        if (activity == null || origin == null) {
+            return;
+        }
+        EDITOR_ACTIVITY_ORIGINS.put(activity, origin.toString());
+    }
+
+    private static void registerEditorActivityReceiver(final Object activity) {
+        if (!(activity instanceof Context)) {
+            return;
+        }
+
+        synchronized (EDITOR_ACTIVITY_RECEIVERS) {
+            if (EDITOR_ACTIVITY_RECEIVERS.containsKey(activity)) {
+                return;
+            }
+        }
+
+        final WeakReference<Object> activityReference = new WeakReference<Object>(activity);
+        final BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                Object target = activityReference.get();
+                if (!(target instanceof Activity) || intent == null
+                        || !ACTION_DELETE_COMPLETE.equals(intent.getAction())) {
+                    return;
+                }
+
+                String deletedOrigin = intent.getStringExtra(EXTRA_DELETE_ORIGIN);
+                String expectedOrigin = EDITOR_ACTIVITY_ORIGINS.get(target);
+                if (deletedOrigin == null || expectedOrigin == null
+                        || !deletedOrigin.equals(expectedOrigin)) {
+                    return;
+                }
+
+                Activity editor = (Activity) target;
+                if (!editor.isFinishing()) {
+                    ModuleLog.log("both images deleted; removing EditorActivity task");
+                    editor.finishAndRemoveTask();
+                }
+            }
+        };
+
+        synchronized (EDITOR_ACTIVITY_RECEIVERS) {
+            if (EDITOR_ACTIVITY_RECEIVERS.containsKey(activity)) {
+                return;
+            }
+            EDITOR_ACTIVITY_RECEIVERS.put(activity, receiver);
+        }
+
+        try {
+            IntentFilter filter = new IntentFilter(ACTION_DELETE_COMPLETE);
+            Context context = (Context) activity;
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                context.registerReceiver(receiver, filter);
+            }
+        } catch (Throwable throwable) {
+            EDITOR_ACTIVITY_RECEIVERS.remove(activity);
+            logFailure("register EditorActivity completion receiver", throwable);
+        }
+    }
+
+    private static void unregisterEditorActivityReceiver(Object activity) {
+        EDITOR_ACTIVITY_ORIGINS.remove(activity);
+        BroadcastReceiver receiver = EDITOR_ACTIVITY_RECEIVERS.remove(activity);
+        if (receiver == null || !(activity instanceof Context)) {
+            return;
+        }
+        try {
+            ((Context) activity).unregisterReceiver(receiver);
+        } catch (Throwable throwable) {
+            logFailure("unregister EditorActivity completion receiver", throwable);
+        }
+    }
+
+    private static synchronized void installGalleryHooks(
+            final ClassLoader classLoader, String apkPath) {
+        if (galleryHooksInstalled) {
+            return;
+        }
+
+        final Class<?> viewModel;
+        final Class<?> galleryShareActivity;
+        try {
+            viewModel = XposedHelpers.findClass(
+                    "com.oplus.gallery.sharepage.viewmodel.ShareInnerViewModel", classLoader);
+            galleryShareActivity = XposedHelpers.findClass(
+                    "com.oplus.gallery.sharepage.GalleryShareActivity", classLoader);
+        } catch (Throwable throwable) {
+            logFailure("locate Gallery classes", throwable);
+            return;
+        }
+
+        final DexKitResolver.GalleryBindings bindings =
+                DexKitResolver.resolveGallery(apkPath, classLoader);
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    galleryShareActivity,
+                    "onCreate",
+                    Bundle.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            updateCurrentGalleryOrigin(getActivityIntent(param.thisObject));
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook GalleryShareActivity.onCreate", throwable);
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    galleryShareActivity,
+                    "onResume",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            updateCurrentGalleryOrigin(getActivityIntent(param.thisObject));
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook GalleryShareActivity.onResume", throwable);
+        }
+
+        try {
+            Class<?> screenShotShareActivity = Class.forName(
+                    "com.oplus.gallery.sharepage.ScreenShotShareActivity", false, classLoader);
+            XposedHelpers.findAndHookMethod(
+                    screenShotShareActivity,
+                    "onNewIntent",
+                    Intent.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Intent intent = param.args.length > 0 && param.args[0] instanceof Intent
+                                    ? (Intent) param.args[0]
+                                    : null;
+                            updateCurrentGalleryOrigin(intent);
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook ScreenShotShareActivity.onNewIntent", throwable);
+        }
+
+        hookMethod(
+                "Gallery ShareInnerViewModel initializer",
+                bindings.initModel,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        rememberModelOrigin(param.thisObject,
+                                param.args.length > 0 ? param.args[0] : null);
+                    }
+                });
+
+        hookMethod(
+                "Gallery ShareInnerViewModel delete queue method",
+                bindings.enqueueDelete,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        augmentDeleteQueueArgument(param, bindings);
+                    }
+                });
+
+        hookMethod(
+                "Gallery recycle operation",
+                bindings.recycle,
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        List<?> items = param.args.length > 0 && param.args[0] instanceof List
+                                ? (List<?>) param.args[0]
+                                : null;
+                        boolean success = param.getResult() instanceof Integer
+                                && ((Integer) param.getResult()).intValue() == 1;
+                        handleRecycleResult(items, success, bindings);
+                    }
+                });
+
+        // Retry the URI-to-path conversion immediately before Gallery flushes
+        // its existing queue. The actual completion notification is sent only
+        // after Gallery's recycle method returns success.
+        hookMethod(
+                "Gallery ShareUtils queue flush",
+                bindings.flushQueue,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (param.args.length > 0 && Boolean.TRUE.equals(param.args[0])) {
+                            retryPendingOriginalAtQueueFlush(bindings);
+                        }
+                    }
+                });
+
+        galleryHooksInstalled = true;
+        ModuleLog.log("Gallery hooks installed");
+    }
+
+    private static void augmentDeleteQueueArgument(
+            XC_MethodHook.MethodHookParam param,
+            DexKitResolver.GalleryBindings bindings) {
+        if (param.args.length == 0 || !(param.args[0] instanceof Set)) {
+            return;
+        }
+
+        // This is the same mode check used by Gallery's original method. It
+        // prevents a stale Screenshot URI from affecting a normal Gallery share.
+        if (!isGalleryShareDeleteMode(param.thisObject, bindings)) {
+            return;
+        }
+
+        String originString = getModelOrigin(param.thisObject, bindings);
+        if (originString == null) {
+            return;
+        }
+
+        Uri originUri;
+        try {
+            originUri = Uri.parse(originString);
+        } catch (Throwable throwable) {
+            logFailure("parse original URI", throwable);
+            return;
+        }
+
+        Set<?> selectedItems = (Set<?>) param.args[0];
+        Object modelActivity = getModelActivity(param.thisObject);
+        armPendingDelete(originUri, modelActivity);
+        Intent shareIntent = getViewModelShareIntent(param.thisObject, bindings);
+        String mimeType = shareIntent == null ? null : shareIntent.getType();
+        Object originPath = resolveGalleryPath(bindings, modelActivity, originUri, mimeType);
+        if (originPath == null) {
+            ModuleLog.warning("Gallery could not resolve original URI " + originUri);
+            return;
+        }
+        rememberPendingDeletePath(originPath);
+
+        if (containsOriginal(selectedItems, originPath, originUri, bindings)) {
+            return;
+        }
+
+        // ShareInnerViewModel's method only queues paths and persists that
+        // queue. Passing a copy keeps the edited image as the sole shared item.
+        LinkedHashSet<Object> queueItems = new LinkedHashSet<Object>();
+        queueItems.addAll(selectedItems);
+        queueItems.add(originPath);
+        param.args[0] = queueItems;
+        ModuleLog.log("original added to Gallery delete queue at share time");
+    }
+
+    private static boolean isGalleryShareDeleteMode(
+            Object viewModel, DexKitResolver.GalleryBindings bindings) {
+        if (bindings.modelDeleteMode == null) {
+            return false;
+        }
+        try {
+            return Boolean.TRUE.equals(bindings.modelDeleteMode.field.get(viewModel));
+        } catch (Throwable throwable) {
+            logFailure("read Gallery share-delete mode", throwable);
+            return false;
+        }
+    }
+
+    private static Uri readScreenshotOrigin(
+            Object action, DexKitResolver.ScreenshotBindings bindings) {
+        try {
+            if (bindings.actionInfo == null
+                    || bindings.imageInfo == null
+                    || bindings.originUri == null) {
+                return null;
+            }
+            Object info = invoke(bindings.actionInfo, action);
+            if (info == null) {
+                return null;
+            }
+            Object imageInfo = invoke(bindings.imageInfo, info);
+            if (imageInfo == null) {
+                return null;
+            }
+            Object origin = invoke(bindings.originUri, imageInfo);
+            return origin instanceof Uri ? (Uri) origin : null;
+        } catch (Throwable throwable) {
+            logFailure("read Screenshot original URI", throwable);
+            return null;
+        }
+    }
+
+    private static Object resolveGalleryPath(
+            DexKitResolver.GalleryBindings bindings,
+            Object activity,
+            Uri originUri,
+            String mimeType) {
+        Object path = resolvePathFromDataManager(bindings, originUri, mimeType);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        // Generic URI paths are shareable but are not converted into delete SQL
+        // by Gallery's recycle helper. Only accept a real local item path.
+        if (!isMediaUri(originUri)) {
+            return null;
+        }
+
+        path = resolvePathFromLocalMediaItem(bindings, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        path = resolvePathFromShareActivity(bindings, activity, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        // Ask Gallery's own data source to refresh the row before retrying.
+        requestMediaSync(bindings, originUri);
+        path = resolvePathFromDataManager(bindings, originUri, null);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        path = resolvePathFromLocalMediaItem(bindings, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        path = resolvePathFromShareActivity(bindings, activity, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        // Last fallback for builds where the local DB exposes the file path
+        // before it exposes the MediaStore URI through DataManager.
+        path = resolvePathFromMediaStore(bindings, activity, originUri);
+        if (isLocalItemPath(path)) {
+            return path;
+        }
+
+        ModuleLog.warning("original URI did not resolve to a local Gallery item: " + originUri);
+        return null;
+    }
+
+    private static Object resolvePathFromDataManager(
+            DexKitResolver.GalleryBindings bindings, Uri originUri, String mimeType) {
+        if (bindings.dataManagerFromUri == null) {
+            return null;
+        }
+        try {
+            Object path = invoke(bindings.dataManagerFromUri, null, originUri, mimeType);
+            if (path == null && mimeType != null) {
+                path = invoke(bindings.dataManagerFromUri, null, originUri, (String) null);
+            }
+            return path;
+        } catch (Throwable throwable) {
+            ModuleLog.warning("resolve original URI in Gallery DataManager failed", throwable);
+            return null;
+        }
+    }
+
+    private static Object resolvePathFromLocalMediaItem(
+            DexKitResolver.GalleryBindings bindings, Uri originUri) {
+        if (bindings.localMediaItem == null) {
+            return null;
+        }
+        try {
+            Object mediaItem = invoke(bindings.localMediaItem, null, originUri);
+            return getMediaObjectPath(mediaItem, bindings);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object resolvePathFromShareActivity(
+            DexKitResolver.GalleryBindings bindings, Object activity, Uri originUri) {
+        if (activity == null || bindings.activityMediaLookup == null) {
+            return null;
+        }
+
+        try {
+            long mediaId = ContentUris.parseId(originUri);
+            Object mediaItem = invoke(
+                    bindings.activityMediaLookup,
+                    activity,
+                    Long.valueOf(mediaId),
+                    originUri);
+            return getMediaObjectPath(mediaItem, bindings);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object resolvePathFromMediaStore(
+            DexKitResolver.GalleryBindings bindings, Object activity, Uri originUri) {
+        if (!(activity instanceof Context) || bindings.localPathFromFile == null) {
+            return null;
+        }
+
+        Cursor cursor = null;
+        try {
+            cursor = ((Context) activity).getContentResolver().query(
+                    originUri, new String[]{"_data"}, null, null, null);
+            if (cursor == null || !cursor.moveToFirst()) {
+                return null;
+            }
+            int dataIndex = cursor.getColumnIndex("_data");
+            if (dataIndex < 0) {
+                return null;
+            }
+            String filePath = cursor.getString(dataIndex);
+            if (filePath == null || filePath.length() == 0) {
+                return null;
+            }
+            return invoke(bindings.localPathFromFile, null, filePath);
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            if (cursor != null) {
+                try {
+                    cursor.close();
+                } catch (Throwable ignored) {
+                    // Ignore a vendor cursor close failure.
+                }
+            }
+        }
+    }
+
+    private static void requestMediaSync(
+            DexKitResolver.GalleryBindings bindings, Uri originUri) {
+        if (bindings.mediaSyncFactory == null || bindings.mediaSync == null) {
+            return;
+        }
+        try {
+            long mediaId = ContentUris.parseId(originUri);
+            Object syncManager = invoke(bindings.mediaSyncFactory, null);
+            if (syncManager != null) {
+                invoke(bindings.mediaSync, syncManager, (Object) new long[]{mediaId});
+            }
+        } catch (Throwable throwable) {
+            ModuleLog.warning("request Gallery media DB refresh failed", throwable);
+        }
+    }
+
+    private static Object getMediaObjectPath(
+            Object mediaItem, DexKitResolver.GalleryBindings bindings) {
+        if (mediaItem == null || bindings.mediaObjectPath == null) {
+            return null;
+        }
+        try {
+            return bindings.mediaObjectPath.field.get(mediaItem);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isMediaUri(Uri uri) {
+        return uri != null
+                && "content".equals(uri.getScheme())
+                && "media".equals(uri.getAuthority());
+    }
+
+    private static boolean isLocalItemPath(Object path) {
+        if (path == null) {
+            return false;
+        }
+        String value = String.valueOf(path);
+        return value.startsWith("/local/item/image/")
+                || value.startsWith("/local/item/video/");
+    }
+
+    private static void armPendingDelete(Uri originUri, Object activity) {
+        synchronized (PENDING_DELETE_LOCK) {
+            pendingDeleteOrigin = originUri;
+            pendingDeleteActivity = activity == null
+                    ? null
+                    : new WeakReference<Object>(activity);
+            pendingDeletePath = null;
+        }
+    }
+
+    private static void rememberPendingDeletePath(Object originPath) {
+        if (!isLocalItemPath(originPath)) {
+            return;
+        }
+        synchronized (PENDING_DELETE_LOCK) {
+            if (pendingDeleteOrigin != null) {
+                pendingDeletePath = originPath;
+            }
+        }
+    }
+
+    private static void retryPendingOriginalAtQueueFlush(
+            DexKitResolver.GalleryBindings bindings) {
+        Uri originUri;
+        Object activity;
+        synchronized (PENDING_DELETE_LOCK) {
+            originUri = pendingDeleteOrigin;
+            activity = pendingDeleteActivity == null ? null : pendingDeleteActivity.get();
+        }
+        if (originUri == null || bindings.shareQueue == null) {
+            return;
+        }
+
+        Object originPath = resolveGalleryPath(bindings, activity, originUri, null);
+        if (!isLocalItemPath(originPath)) {
+            ModuleLog.warning("original still has no local Gallery path at queue flush: "
+                    + originUri);
+            return;
+        }
+        rememberPendingDeletePath(originPath);
+
+        try {
+            Object queueObject = bindings.shareQueue.field.get(null);
+            if (!(queueObject instanceof List)) {
+                return;
+            }
+            List<?> queue = (List<?>) queueObject;
+            synchronized (queue) {
+                if (!queue.contains(originPath)) {
+                    @SuppressWarnings("unchecked")
+                    List<Object> mutableQueue = (List<Object>) queueObject;
+                    mutableQueue.add(originPath);
+                    ModuleLog.log("original added during Gallery queue flush");
+                }
+            }
+        } catch (Throwable throwable) {
+            logFailure("retry original at Gallery queue flush", throwable);
+        }
+    }
+
+    private static void clearPendingDelete() {
+        synchronized (PENDING_DELETE_LOCK) {
+            pendingDeleteOrigin = null;
+            pendingDeleteActivity = null;
+            pendingDeletePath = null;
+        }
+    }
+
+    private static void handleRecycleResult(
+            List<?> items,
+            boolean success,
+            DexKitResolver.GalleryBindings bindings) {
+        if (items == null) {
+            return;
+        }
+
+        Uri originUri;
+        synchronized (PENDING_DELETE_LOCK) {
+            if (pendingDeleteOrigin == null || pendingDeletePath == null
+                    || !containsQueueItem(items, pendingDeletePath)) {
+                return;
+            }
+
+            originUri = pendingDeleteOrigin;
+            boolean bothImagesWereQueued = items.size() > 1;
+            clearPendingDelete();
+            if (!success || !bothImagesWereQueued) {
+                ModuleLog.warning("recycle did not confirm both screenshot images");
+                return;
+            }
+        }
+
+        // This runs after the same q0l recycle method Gallery uses for the
+        // edited image returns success, so EditorActivity is removed only after
+        // both paths have gone through that operation.
+        notifyScreenshotDeletionComplete(originUri, bindings);
+    }
+
+    private static boolean containsQueueItem(List<?> items, Object expected) {
+        try {
+            if (items.contains(expected)) {
+                return true;
+            }
+        } catch (Throwable ignored) {
+            // Fall through to the string comparison for unusual list types.
+        }
+
+        String expectedValue = String.valueOf(expected);
+        for (Object item : items) {
+            if (item != null && expectedValue.equals(String.valueOf(item))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void notifyScreenshotDeletionComplete(
+            Uri originUri, DexKitResolver.GalleryBindings bindings) {
+        if (bindings.appContext == null) {
+            return;
+        }
+        try {
+            Object contextValue = bindings.appContext.field.get(null);
+            Context application = contextValue instanceof Context
+                    ? ((Context) contextValue).getApplicationContext()
+                    : null;
+            if (application == null && contextValue instanceof Context) {
+                application = (Context) contextValue;
+            }
+            if (application == null || originUri == null) {
+                return;
+            }
+            Intent intent = new Intent(ACTION_DELETE_COMPLETE);
+            intent.setPackage(SCREENSHOT_PACKAGE);
+            intent.putExtra(EXTRA_DELETE_ORIGIN, originUri.toString());
+            application.sendBroadcast(intent);
+            ModuleLog.log("deletion completion sent to Screenshot");
+        } catch (Throwable throwable) {
+            logFailure("notify Screenshot deletion completion", throwable);
+        }
+    }
+
+    private static boolean containsOriginal(
+            Set<?> selectedItems,
+            Object originPath,
+            Uri originUri,
+            DexKitResolver.GalleryBindings bindings) {
+        try {
+            if (selectedItems.contains(originPath)) {
+                return true;
+            }
+        } catch (Throwable ignored) {
+            // The URI comparison below handles unusual Set implementations.
+        }
+
+        if (bindings.dataManagerToUri == null) {
+            return false;
+        }
+        try {
+            for (Object selectedItem : selectedItems) {
+                if (selectedItem == null) {
+                    continue;
+                }
+                Object selectedUri = invoke(bindings.dataManagerToUri, null, selectedItem);
+                if (originUri.equals(selectedUri)) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+            // A failed duplicate check must not prevent the normal queue path.
+        }
+        return false;
+    }
+
+    private static void rememberModelOrigin(
+            Object viewModel,
+            Object activity) {
+        if (viewModel == null) {
+            return;
+        }
+        String origin = readOriginExtra(getActivityIntent(activity));
+        if (origin == null) {
+            origin = getCurrentGalleryOrigin();
+        }
+        if (origin != null) {
+            GALLERY_MODEL_ORIGINS.put(viewModel, origin);
+        } else {
+            GALLERY_MODEL_ORIGINS.remove(viewModel);
+            GALLERY_MODEL_ACTIVITIES.remove(viewModel);
+        }
+        if (origin != null && activity != null) {
+            GALLERY_MODEL_ACTIVITIES.put(viewModel, new WeakReference<Object>(activity));
+        }
+    }
+
+    private static Object getModelActivity(Object viewModel) {
+        WeakReference<Object> reference = GALLERY_MODEL_ACTIVITIES.get(viewModel);
+        return reference == null ? null : reference.get();
+    }
+
+    private static String getModelOrigin(
+            Object viewModel, DexKitResolver.GalleryBindings bindings) {
+        String origin = GALLERY_MODEL_ORIGINS.get(viewModel);
+        if (origin != null) {
+            return origin;
+        }
+
+        Intent shareIntent = getViewModelShareIntent(viewModel, bindings);
+        origin = readOriginExtra(shareIntent);
+        if (origin != null) {
+            GALLERY_MODEL_ORIGINS.put(viewModel, origin);
+            return origin;
+        }
+        return getCurrentGalleryOrigin();
+    }
+
+    private static Intent getViewModelShareIntent(
+            Object viewModel, DexKitResolver.GalleryBindings bindings) {
+        if (viewModel == null || bindings.modelShareIntent == null) {
+            return null;
+        }
+        try {
+            Object value = bindings.modelShareIntent.field.get(viewModel);
+            return value instanceof Intent ? (Intent) value : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Intent getActivityIntent(Object activity) {
+        if (!(activity instanceof Activity)) {
+            return null;
+        }
+        try {
+            return ((Activity) activity).getIntent();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void updateCurrentGalleryOrigin(Intent intent) {
+        synchronized (CURRENT_GALLERY_ORIGIN_LOCK) {
+            currentGalleryOrigin = readOriginExtra(intent);
+        }
+    }
+
+    private static String getCurrentGalleryOrigin() {
+        synchronized (CURRENT_GALLERY_ORIGIN_LOCK) {
+            return currentGalleryOrigin;
+        }
+    }
+
+    private static String readOriginExtra(Intent intent) {
+        if (intent == null || !intent.hasExtra(EXTRA_ORIGIN_URI)) {
+            return null;
+        }
+        try {
+            String value = intent.getStringExtra(EXTRA_ORIGIN_URI);
+            return value == null || value.length() == 0 ? null : value;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static PendingOrigin peekPendingOrigin() {
+        ArrayDeque<PendingOrigin> stack = PENDING_ORIGINS.get();
+        return stack.isEmpty() ? null : stack.peek();
+    }
+
+    private static void hookMethod(
+            String label,
+            DexKitResolver.MethodBinding binding,
+            XC_MethodHook hook) {
+        if (binding == null) {
+            return;
+        }
+        try {
+            XposedBridge.hookMethod(binding.method, hook);
+        } catch (Throwable throwable) {
+            logFailure("hook " + label, throwable);
+        }
+    }
+
+    private static Object invoke(
+            DexKitResolver.MethodBinding binding, Object receiver, Object... args)
+            throws Exception {
+        return binding.method.invoke(receiver, args);
+    }
+
+    private static void logFailure(String operation, Throwable throwable) {
+        if (throwable == null) {
+            ModuleLog.warning(operation + " failed");
+        } else {
+            ModuleLog.warning(operation + " failed", throwable);
+        }
+    }
+
+    private static final class PendingOrigin {
+        private final Uri uri;
+
+        private PendingOrigin(Uri uri) {
+            this.uri = uri;
+        }
+    }
+}
