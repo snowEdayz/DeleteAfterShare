@@ -274,6 +274,12 @@ final class DexKitResolver {
             String recycleClass = newGalleryModel
                     ? "com.oplus.aiunit.vision.hp00"
                     : "com.oplus.aiunit.vision.q0l";
+            String appContextClass = newGalleryModel
+                    ? "com.oplus.aiunit.vision.tja"
+                    : "com.oplus.aiunit.vision.e29";
+            String appContextType = newGalleryModel
+                    ? "com.coloros.gallery3d.app.App"
+                    : "android.content.Context";
             ModuleLog.log("Gallery model bindings: "
                     + (newGalleryModel ? "new" : "legacy"));
 
@@ -409,8 +415,8 @@ final class DexKitResolver {
                     classLoader,
                     "Gallery application context field",
                     new FieldMatcher()
-                            .declaredClass("com.oplus.aiunit.vision.e29")
-                            .type("android.content.Context")
+                            .declaredClass(appContextClass)
+                            .type(appContextType)
                             .modifiers(Modifier.STATIC));
             FieldBinding mediaObjectPath = findField(
                     bridge,
