@@ -58,6 +58,8 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             Collections.synchronizedMap(new WeakHashMap<Object, ContentObserver>());
     private static final Map<Object, String> EDITOR_ACTIVITY_ORIGINS =
             Collections.synchronizedMap(new WeakHashMap<Object, String>());
+    private static final Map<Object, Boolean> EDITOR_ACTIVITY_SHARE_PENDING =
+            Collections.synchronizedMap(new WeakHashMap<Object, Boolean>());
     private static final Map<Object, String> GALLERY_MODEL_ORIGINS =
             Collections.synchronizedMap(new WeakHashMap<Object, String>());
     private static final Map<Object, WeakReference<Object>> GALLERY_MODEL_ACTIVITIES =
@@ -149,6 +151,23 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             logFailure("hook EditorActivity.onDestroy", throwable);
         }
 
+        try {
+            XposedHelpers.findAndHookMethod(
+                    editorActivity,
+                    "onPause",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject instanceof Activity
+                                    && consumeEditorActivitySharePending(param.thisObject)) {
+                                finishEditorActivityAfterShare((Activity) param.thisObject);
+                            }
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook EditorActivity.onPause", throwable);
+        }
+
         hookDexKitMethod(
                 "Screenshot GalleryStartHelper factory",
                 bindings.galleryFactory,
@@ -171,6 +190,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     protected void beforeHookedMethod(MethodHookParam param) {
                         Uri origin = readScreenshotOrigin(param.thisObject, bindings);
                         Object activity = getActionActivity(param.thisObject, bindings);
+                        markEditorActivitySharePending(activity);
                         if (origin != null && activity != null) {
                             rememberEditorActivityOrigin(activity, origin);
                             registerEditorActivityReceiver(activity);
@@ -291,6 +311,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
     private static void unregisterEditorActivityReceiver(Object activity) {
         EDITOR_ACTIVITY_ORIGINS.remove(activity);
+        EDITOR_ACTIVITY_SHARE_PENDING.remove(activity);
         unregisterEditorActivityDeletionObserver(activity);
         BroadcastReceiver receiver = EDITOR_ACTIVITY_RECEIVERS.remove(activity);
         if (receiver == null || !(activity instanceof Context)) {
@@ -300,6 +321,47 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             ((Context) activity).unregisterReceiver(receiver);
         } catch (Throwable throwable) {
             logFailure("unregister EditorActivity completion receiver", throwable);
+        }
+    }
+
+    private static void markEditorActivitySharePending(Object activity) {
+        if (activity instanceof Activity) {
+            EDITOR_ACTIVITY_SHARE_PENDING.put(activity, Boolean.TRUE);
+        }
+    }
+
+    private static boolean consumeEditorActivitySharePending(Object activity) {
+        return Boolean.TRUE.equals(EDITOR_ACTIVITY_SHARE_PENDING.remove(activity));
+    }
+
+    private static void finishEditorActivityAfterShare(final Activity editor) {
+        if (editor == null) {
+            return;
+        }
+
+        Runnable finish = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (!editor.isFinishing()) {
+                        // The Gallery share Activity is launched on top of the
+                        // editor in the legacy build. Finish only this caller
+                        // here so the share UI remains usable; its excluded
+                        // Gallery task then does not leave the editor card in
+                        // Recents.
+                        editor.finish();
+                        ModuleLog.log("EditorActivity finish requested after share");
+                    }
+                } catch (Throwable throwable) {
+                    logFailure("finish EditorActivity after share", throwable);
+                }
+            }
+        };
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            finish.run();
+        } else {
+            editor.runOnUiThread(finish);
         }
     }
 

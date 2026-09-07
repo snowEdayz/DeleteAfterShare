@@ -23,7 +23,7 @@
 
 模块使用 DexKit 2.2.0 在目标 APK 的真实 DEX 定义中解析成员：方法同时匹配声明类、完整参数列表、返回值，以及必要的调用关系或字符串；字段同时匹配声明类、类型和访问关系。每个查询必须恰好得到一个结果，0 个或多个结果都会跳过对应 Hook，因此不会把 JADX 的阅读名称当作 Hook 名。代码中只有 Android 生命周期回调使用固定的公开方法名；厂商业务方法（包括混淆方法）统一通过 DexKit 查找后再 Hook。
 
-`com.oplus.screenshot` 和 `com.coloros.gallery3d` 都属于功能链路的一部分，两个 APK 都必须在 Xposed scope 中启用。原图路径加入图库现有队列后，由图库自己的回收方法处理；模块只在该回收方法返回成功后通知截图进程销毁 `EditorActivity`，使它从多任务界面消失。
+`com.oplus.screenshot` 和 `com.coloros.gallery3d` 都属于功能链路的一部分，两个 APK 都必须在 Xposed scope 中启用。分享启动后，模块会在截图进程的 `EditorActivity.onPause` 中结束调用方 Activity，使它立即从多任务界面消失；原图路径仍会加入图库现有队列，由图库自己的回收方法处理，回收成功回调作为跨进程清理兜底。
 
 ## 构建
 
