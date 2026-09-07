@@ -21,7 +21,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
-import de.robv.android.xposed.AndroidAppHelper;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -412,7 +411,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                                     : null;
                             boolean success = param.getResult() instanceof Integer
                                     && ((Integer) param.getResult()).intValue() == 1;
-                            handleRecycleResult(items, success);
+                            handleRecycleResult(items, success, classLoader);
                         }
                     });
         } catch (Throwable throwable) {
@@ -801,7 +800,8 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void handleRecycleResult(List<?> items, boolean success) {
+    private static void handleRecycleResult(
+            List<?> items, boolean success, ClassLoader classLoader) {
         if (items == null) {
             return;
         }
@@ -822,7 +822,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             }
         }
 
-        notifyScreenshotDeletionComplete(originUri);
+        notifyScreenshotDeletionComplete(originUri, classLoader);
     }
 
     private static boolean containsQueueItem(List<?> items, Object expected) {
@@ -843,9 +843,18 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         return false;
     }
 
-    private static void notifyScreenshotDeletionComplete(Uri originUri) {
+    private static void notifyScreenshotDeletionComplete(Uri originUri, ClassLoader classLoader) {
         try {
-            Context application = AndroidAppHelper.currentApplication();
+            Class<?> contextHolder = Class.forName(
+                    "com.oplus.aiunit.vision.e29", false, classLoader);
+            // Gallery's ShareUtils reads its application context from e29.a.
+            Object contextValue = XposedHelpers.getStaticObjectField(contextHolder, "a");
+            Context application = contextValue instanceof Context
+                    ? ((Context) contextValue).getApplicationContext()
+                    : null;
+            if (application == null && contextValue instanceof Context) {
+                application = (Context) contextValue;
+            }
             if (application == null || originUri == null) {
                 return;
             }
