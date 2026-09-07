@@ -238,7 +238,7 @@ final class DexKitResolver {
                     imageInfo,
                     originUri);
         } catch (Throwable throwable) {
-            logFailure("resolve Screenshot members with DexKit", throwable);
+            ModuleLog.warning("resolve Screenshot members with DexKit failed", throwable);
             return new ScreenshotBindings(null, null, null, null, null, null, null);
         } finally {
             close(bridge);
@@ -283,7 +283,7 @@ final class DexKitResolver {
             String appContextType = newGalleryModel
                     ? "com.coloros.gallery3d.app.App"
                     : "android.content.Context";
-            ModuleLog.log("Gallery model bindings: "
+            ModuleLog.debug("Gallery model bindings: "
                     + (newGalleryModel ? "new" : "legacy"));
 
             MethodBinding initModel = findMethod(
@@ -448,7 +448,7 @@ final class DexKitResolver {
                     appContext,
                     mediaObjectPath);
         } catch (Throwable throwable) {
-            logFailure("resolve Gallery members with DexKit", throwable);
+            ModuleLog.warning("resolve Gallery members with DexKit failed", throwable);
             return new GalleryBindings(
                     null,
                     null,
@@ -507,14 +507,14 @@ final class DexKitResolver {
             MethodData data = matches.get(0);
             Method method = data.getMethodInstance(classLoader);
             if (method == null) {
-                logFailure(label + " returned no reflection method", null);
+                ModuleLog.warning(label + " returned no reflection method");
                 return null;
             }
             method.setAccessible(true);
-            ModuleLog.log("DexKit resolved " + label + " -> " + data.getDescriptor());
+            ModuleLog.debug("DexKit resolved " + label + " -> " + data.getDescriptor());
             return new MethodBinding(method, data.getDescriptor());
         } catch (Throwable throwable) {
-            logFailure(label, throwable);
+            ModuleLog.warning(label + " failed", throwable);
             return null;
         }
     }
@@ -533,14 +533,14 @@ final class DexKitResolver {
             FieldData data = matches.get(0);
             Field field = data.getFieldInstance(classLoader);
             if (field == null) {
-                logFailure(label + " returned no reflection field", null);
+                ModuleLog.warning(label + " returned no reflection field");
                 return null;
             }
             field.setAccessible(true);
-            ModuleLog.log("DexKit resolved " + label + " -> " + data.getDescriptor());
+            ModuleLog.debug("DexKit resolved " + label + " -> " + data.getDescriptor());
             return new FieldBinding(field, data.getDescriptor());
         } catch (Throwable throwable) {
-            logFailure(label, throwable);
+            ModuleLog.warning(label + " failed", throwable);
             return null;
         }
     }
@@ -578,15 +578,7 @@ final class DexKitResolver {
         try {
             bridge.close();
         } catch (Throwable throwable) {
-            logFailure("close DexKit bridge", throwable);
-        }
-    }
-
-    private static void logFailure(String operation, Throwable throwable) {
-        if (throwable == null) {
-            ModuleLog.warning(operation + " failed");
-        } else {
-            ModuleLog.warning(operation + " failed", throwable);
+            ModuleLog.warning("close DexKit bridge failed", throwable);
         }
     }
 }

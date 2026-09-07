@@ -93,7 +93,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         }
 
         if (lpparam.appInfo == null || lpparam.appInfo.sourceDir == null) {
-            logFailure("read target APK path", null);
+            ModuleLog.warning("read target APK path failed");
             return;
         }
 
@@ -115,7 +115,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             editorActivity = XposedHelpers.findClass(
                     "com.oplus.screenshot.editor.activity.EditorActivity", classLoader);
         } catch (Throwable throwable) {
-            logFailure("locate Screenshot classes", throwable);
+            ModuleLog.warning("locate Screenshot classes failed", throwable);
             return;
         }
 
@@ -137,7 +137,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook EditorActivity.onCreate", throwable);
+            ModuleLog.warning("hook EditorActivity.onCreate failed", throwable);
         }
 
         try {
@@ -151,7 +151,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook EditorActivity.onDestroy", throwable);
+            ModuleLog.warning("hook EditorActivity.onDestroy failed", throwable);
         }
 
         hookDexKitMethod(
@@ -214,7 +214,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 });
 
         screenshotHooksInstalled = true;
-        ModuleLog.log("Screenshot hooks installed");
+        ModuleLog.debug("Screenshot hooks installed");
     }
 
     private static Object getActionActivity(
@@ -226,7 +226,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             Object value = invoke(bindings.actionActivity, action);
             return value instanceof Activity ? value : null;
         } catch (Throwable throwable) {
-            logFailure("read EditorActivity from SendMenuAction", throwable);
+            ModuleLog.warning("read EditorActivity from SendMenuAction failed", throwable);
             return null;
         }
     }
@@ -268,7 +268,8 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             Context application = galleryActivity.getApplicationContext();
             notificationContext = application != null ? application : galleryActivity;
         } catch (Throwable throwable) {
-            logFailure("read Gallery application context for delayed share signal", throwable);
+            ModuleLog.warning(
+                    "read Gallery application context for delayed share signal failed", throwable);
             return;
         }
 
@@ -276,7 +277,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             taskId = galleryActivity.getTaskId();
         } catch (Throwable throwable) {
-            logFailure("read Gallery share task id for delayed share signal", throwable);
+            ModuleLog.warning("read Gallery share task id for delayed share signal failed", throwable);
             return;
         }
 
@@ -289,7 +290,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 notifyScreenshotShareTargetLaunched(notificationContext, taskId, origin);
             }
         }, SHARE_TARGET_NOTIFY_DELAY_MS);
-        ModuleLog.log("Gallery share target launched; delayed Screenshot notification by "
+        ModuleLog.debug("Gallery share target launched; delayed Screenshot notification by "
                 + SHARE_TARGET_NOTIFY_DELAY_MS + "ms");
     }
 
@@ -303,9 +304,9 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 signal.putExtra(EXTRA_ORIGIN_URI, origin);
             }
             galleryContext.sendBroadcast(signal);
-            ModuleLog.log("Gallery share target launched; notified Screenshot process after delay");
+            ModuleLog.debug("Gallery share target launched; notified Screenshot process after delay");
         } catch (Throwable throwable) {
-            logFailure("notify Screenshot after Gallery share target launch", throwable);
+            ModuleLog.warning("notify Screenshot after Gallery share target launch failed", throwable);
         }
     }
 
@@ -353,11 +354,11 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                                 return;
                             }
                         } catch (Throwable throwable) {
-                            logFailure("read EditorActivity task id for share signal", throwable);
+                            ModuleLog.warning("read EditorActivity task id for share signal failed", throwable);
                             return;
                         }
                     }
-                    ModuleLog.log("share target launched; removing EditorActivity task");
+                    ModuleLog.debug("share target launched; removing EditorActivity task");
                     finishEditorActivityAfterTargetLaunch((Activity) target);
                     return;
                 }
@@ -374,7 +375,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 }
 
                 Activity editor = (Activity) target;
-                ModuleLog.log("both images deleted; removing EditorActivity task");
+                ModuleLog.debug("both images deleted; removing EditorActivity task");
                 removeEditorActivityTask(editor);
             }
         };
@@ -398,7 +399,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable throwable) {
             EDITOR_ACTIVITY_RECEIVERS.remove(activity);
-            logFailure("register EditorActivity completion receiver", throwable);
+            ModuleLog.warning("register EditorActivity completion receiver failed", throwable);
         }
     }
 
@@ -412,7 +413,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             ((Context) activity).unregisterReceiver(receiver);
         } catch (Throwable throwable) {
-            logFailure("unregister EditorActivity completion receiver", throwable);
+            ModuleLog.warning("unregister EditorActivity completion receiver failed", throwable);
         }
     }
 
@@ -428,14 +429,17 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 try {
                     taskId = editor.getTaskId();
                 } catch (Throwable throwable) {
-                    logFailure("read EditorActivity task id before target launch finish", throwable);
+                    ModuleLog.warning(
+                            "read EditorActivity task id before target launch finish failed", throwable);
                 }
 
                 Context application = null;
                 try {
                     application = editor.getApplicationContext();
                 } catch (Throwable throwable) {
-                    logFailure("read Screenshot application context before target launch finish", throwable);
+                    ModuleLog.warning(
+                            "read Screenshot application context before target launch finish failed",
+                            throwable);
                 }
 
                 try {
@@ -446,10 +450,10 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     excludeAppTaskFromRecents(application, taskId);
                     if (!editor.isFinishing()) {
                         editor.finish();
-                        ModuleLog.log("EditorActivity finish requested after share target launch");
+                        ModuleLog.debug("EditorActivity finish requested after share target launch");
                     }
                 } catch (Throwable throwable) {
-                    logFailure("finish EditorActivity after share target launch", throwable);
+                    ModuleLog.warning("finish EditorActivity after share target launch failed", throwable);
                 }
 
                 final Context retryContext = application;
@@ -502,7 +506,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     @Override
                     public void run() {
                         if (isMediaStoreRowMissing(target, origin)) {
-                            ModuleLog.log("original screenshot deleted; removing EditorActivity task");
+                            ModuleLog.debug("original screenshot deleted; removing EditorActivity task");
                             removeEditorActivityTask(target);
                         }
                     }
@@ -516,7 +520,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             resolver.registerContentObserver(origin, true, observer);
         } catch (Throwable throwable) {
             EDITOR_ACTIVITY_OBSERVERS.remove(activity);
-            logFailure("register EditorActivity media deletion observer", throwable);
+            ModuleLog.warning("register EditorActivity media deletion observer failed", throwable);
         }
     }
 
@@ -528,7 +532,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             ((Activity) activity).getContentResolver().unregisterContentObserver(observer);
         } catch (Throwable throwable) {
-            logFailure("unregister EditorActivity media deletion observer", throwable);
+            ModuleLog.warning("unregister EditorActivity media deletion observer failed", throwable);
         }
     }
 
@@ -565,14 +569,14 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 try {
                     taskId = editor.getTaskId();
                 } catch (Throwable throwable) {
-                    logFailure("read EditorActivity task id", throwable);
+                    ModuleLog.warning("read EditorActivity task id failed", throwable);
                 }
 
                 Context application = null;
                 try {
                     application = editor.getApplicationContext();
                 } catch (Throwable throwable) {
-                    logFailure("read Screenshot application context", throwable);
+                    ModuleLog.warning("read Screenshot application context failed", throwable);
                 }
 
                 // Ask ActivityManager to remove the owning task as well as
@@ -581,10 +585,10 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 removeAppTask(application, taskId);
                 try {
                     editor.finishAndRemoveTask();
-                    ModuleLog.log("EditorActivity finishAndRemoveTask requested, taskId="
+                    ModuleLog.debug("EditorActivity finishAndRemoveTask requested, taskId="
                             + taskId);
                 } catch (Throwable throwable) {
-                    logFailure("finish and remove EditorActivity task", throwable);
+                    ModuleLog.warning("finish and remove EditorActivity task failed", throwable);
                 }
 
                 // The first ActivityManager request can race the task-stack
@@ -625,13 +629,13 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 ActivityManager.RecentTaskInfo info = task.getTaskInfo();
                 if (info != null && info.id == taskId) {
                     task.setExcludeFromRecents(true);
-                    ModuleLog.log("ActivityManager excluded EditorActivity task from Recents, taskId="
+                    ModuleLog.debug("ActivityManager excluded EditorActivity task from Recents, taskId="
                             + taskId);
                     return;
                 }
             }
         } catch (Throwable throwable) {
-            logFailure("exclude EditorActivity task from Recents", throwable);
+            ModuleLog.warning("exclude EditorActivity task from Recents failed", throwable);
         }
     }
 
@@ -653,13 +657,13 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 ActivityManager.RecentTaskInfo info = task.getTaskInfo();
                 if (info != null && info.id == taskId) {
                     task.finishAndRemoveTask();
-                    ModuleLog.log("ActivityManager removed EditorActivity task, taskId="
+                    ModuleLog.debug("ActivityManager removed EditorActivity task, taskId="
                             + taskId);
                     return;
                 }
             }
         } catch (Throwable throwable) {
-            logFailure("remove EditorActivity task from ActivityManager", throwable);
+            ModuleLog.warning("remove EditorActivity task from ActivityManager failed", throwable);
         }
     }
 
@@ -677,7 +681,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             galleryShareActivity = XposedHelpers.findClass(
                     "com.oplus.gallery.sharepage.GalleryShareActivity", classLoader);
         } catch (Throwable throwable) {
-            logFailure("locate Gallery classes", throwable);
+            ModuleLog.warning("locate Gallery classes failed", throwable);
             return;
         }
 
@@ -699,7 +703,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook GalleryShareActivity.onCreate", throwable);
+            ModuleLog.warning("hook GalleryShareActivity.onCreate failed", throwable);
         }
 
         try {
@@ -713,7 +717,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook GalleryShareActivity.onResume", throwable);
+            ModuleLog.warning("hook GalleryShareActivity.onResume failed", throwable);
         }
 
         try {
@@ -746,7 +750,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     Bundle.class,
                     createShareTargetLaunchHook(screenShotShareActivity));
         } catch (Throwable throwable) {
-            logFailure("hook ScreenShotShareActivity share target launch", throwable);
+            ModuleLog.warning("hook ScreenShotShareActivity share target launch failed", throwable);
         }
 
         hookDexKitMethod(
@@ -801,7 +805,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 });
 
         galleryHooksInstalled = true;
-        ModuleLog.log("Gallery hooks installed");
+        ModuleLog.debug("Gallery hooks installed");
     }
 
     private static void augmentDeleteQueueArgument(
@@ -826,7 +830,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             originUri = Uri.parse(originString);
         } catch (Throwable throwable) {
-            logFailure("parse original URI", throwable);
+            ModuleLog.warning("parse original URI failed", throwable);
             return;
         }
 
@@ -852,7 +856,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         queueItems.addAll(selectedItems);
         queueItems.add(originPath);
         param.args[0] = queueItems;
-        ModuleLog.log("original added to Gallery delete queue at share time");
+        ModuleLog.debug("original added to Gallery delete queue at share time");
     }
 
     private static boolean isGalleryShareDeleteMode(
@@ -863,7 +867,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             return Boolean.TRUE.equals(bindings.modelDeleteMode.field.get(viewModel));
         } catch (Throwable throwable) {
-            logFailure("read Gallery share-delete mode", throwable);
+            ModuleLog.warning("read Gallery share-delete mode failed", throwable);
             return false;
         }
     }
@@ -887,7 +891,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             Object origin = invoke(bindings.originUri, imageInfo);
             return origin instanceof Uri ? (Uri) origin : null;
         } catch (Throwable throwable) {
-            logFailure("read Screenshot original URI", throwable);
+            ModuleLog.warning("read Screenshot original URI failed", throwable);
             return null;
         }
     }
@@ -1125,11 +1129,11 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     @SuppressWarnings("unchecked")
                     List<Object> mutableQueue = (List<Object>) queueObject;
                     mutableQueue.add(originPath);
-                    ModuleLog.log("original added during Gallery queue flush");
+                    ModuleLog.debug("original added during Gallery queue flush");
                 }
             }
         } catch (Throwable throwable) {
-            logFailure("retry original at Gallery queue flush", throwable);
+            ModuleLog.warning("retry original at Gallery queue flush failed", throwable);
         }
     }
 
@@ -1211,9 +1215,9 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
             intent.putExtra(EXTRA_DELETE_ORIGIN, originUri.toString());
             application.sendBroadcast(intent);
-            ModuleLog.log("deletion completion sent to Screenshot");
+            ModuleLog.debug("deletion completion sent to Screenshot");
         } catch (Throwable throwable) {
-            logFailure("notify Screenshot deletion completion", throwable);
+            ModuleLog.warning("notify Screenshot deletion completion failed", throwable);
         }
     }
 
@@ -1358,7 +1362,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             XposedBridge.hookMethod(binding.method, hook);
         } catch (Throwable throwable) {
-            logFailure("hook " + label, throwable);
+            ModuleLog.warning("hook " + label + " failed", throwable);
         }
     }
 
@@ -1366,14 +1370,6 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             DexKitResolver.MethodBinding binding, Object receiver, Object... args)
             throws Exception {
         return binding.method.invoke(receiver, args);
-    }
-
-    private static void logFailure(String operation, Throwable throwable) {
-        if (throwable == null) {
-            ModuleLog.warning(operation + " failed");
-        } else {
-            ModuleLog.warning(operation + " failed", throwable);
-        }
     }
 
     private static final class PendingOrigin {
