@@ -248,6 +248,33 @@ final class DexKitResolver {
         try {
             bridge = DexKitBridge.create(apkPath);
 
+            // The new Gallery build migrated the path/data model classes while
+            // keeping the share-page classes stable. Select the type graph
+            // from the APK loaded in this process instead of assuming that the
+            // old obfuscated names are still present.
+            boolean newGalleryModel = hasClass(
+                    classLoader, "com.oplus.aiunit.vision.q7b");
+            String pathClass = newGalleryModel
+                    ? "com.oplus.aiunit.vision.dst"
+                    : "com.oplus.aiunit.vision.p3h";
+            String dataManagerClass = newGalleryModel
+                    ? "com.oplus.aiunit.vision.q7b"
+                    : "com.oplus.aiunit.vision.f86";
+            String localMediaHelperClass = newGalleryModel
+                    ? "com.oplus.aiunit.vision.h3n"
+                    : "com.oplus.aiunit.vision.ukd";
+            String mediaItemClass = newGalleryModel
+                    ? "com.oplus.aiunit.vision.vjo"
+                    : "com.oplus.aiunit.vision.tge";
+            String localMediaItemClass = newGalleryModel
+                    ? "com.oplus.aiunit.vision.u4n"
+                    : "com.oplus.aiunit.vision.old";
+            String recycleClass = newGalleryModel
+                    ? "com.oplus.aiunit.vision.hp00"
+                    : "com.oplus.aiunit.vision.q0l";
+            ModuleLog.log("Gallery model bindings: "
+                    + (newGalleryModel ? "new" : "legacy"));
+
             MethodBinding initModel = findMethod(
                     bridge,
                     classLoader,
@@ -293,7 +320,7 @@ final class DexKitResolver {
                     classLoader,
                     "Gallery recycle operation",
                     signature(
-                            "com.oplus.aiunit.vision.q0l",
+                            recycleClass,
                             "int",
                             "java.util.List",
                             "boolean"));
@@ -319,8 +346,8 @@ final class DexKitResolver {
                     classLoader,
                     "Gallery DataManager URI to path",
                     signature(
-                            "com.oplus.aiunit.vision.f86",
-                            "com.oplus.aiunit.vision.p3h",
+                            dataManagerClass,
+                            pathClass,
                             "android.net.Uri",
                             "java.lang.String"));
             MethodBinding dataManagerToUri = findMethod(
@@ -328,24 +355,24 @@ final class DexKitResolver {
                     classLoader,
                     "Gallery DataManager path to URI",
                     signature(
-                            "com.oplus.aiunit.vision.f86",
+                            dataManagerClass,
                             "android.net.Uri",
-                            "com.oplus.aiunit.vision.p3h"));
+                            pathClass));
             MethodBinding localMediaItem = findMethod(
                     bridge,
                     classLoader,
                     "Gallery LocalSource URI lookup",
                     signature(
-                            "com.oplus.aiunit.vision.ukd",
-                            "com.oplus.aiunit.vision.old",
+                            localMediaHelperClass,
+                            localMediaItemClass,
                             "android.net.Uri"));
             MethodBinding localPathFromFile = findMethod(
                     bridge,
                     classLoader,
                     "Gallery LocalSource file path lookup",
                     signature(
-                            "com.oplus.aiunit.vision.ukd",
-                            "com.oplus.aiunit.vision.p3h",
+                            localMediaHelperClass,
+                            pathClass,
                             "java.lang.String"));
             MethodBinding activityMediaLookup = findMethod(
                     bridge,
@@ -353,7 +380,7 @@ final class DexKitResolver {
                     "GalleryShareActivity media ID lookup",
                     signature(
                             "com.oplus.gallery.sharepage.GalleryShareActivity",
-                            "com.oplus.aiunit.vision.tge",
+                            mediaItemClass,
                             "long",
                             "android.net.Uri")
                             .usingStrings(
@@ -390,7 +417,7 @@ final class DexKitResolver {
                     new FieldMatcher()
                             .declaredClass(
                                     "com.oplus.gallery.business_lib.model.data.base.MediaObject")
-                            .type("com.oplus.aiunit.vision.p3h"));
+                            .type(pathClass));
 
             return new GalleryBindings(
                     initModel,
@@ -444,6 +471,15 @@ final class DexKitResolver {
             matcher.paramTypes(parameterTypes);
         }
         return matcher;
+    }
+
+    private static boolean hasClass(ClassLoader classLoader, String className) {
+        try {
+            Class.forName(className, false, classLoader);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static MethodBinding findMethod(
