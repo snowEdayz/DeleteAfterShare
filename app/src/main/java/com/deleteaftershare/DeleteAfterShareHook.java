@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -25,21 +26,20 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import io.github.libxposed.api.XposedInterface;
+import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
+import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 
 /**
- * Xposed Legacy entry point for the supplied Oplus Screenshot/Gallery builds.
+ * Modern Xposed entry point for the supplied Oplus Screenshot/Gallery builds.
  *
  * The Screenshot process puts the original URI on the Gallery share Intent.
  * The Gallery process adds the corresponding Gallery path only to the argument
  * used by its existing delete-after-share queue. The actual share Intent and
  * Gallery selection remain unchanged.
  */
-public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
+public final class DeleteAfterShareHook extends XposedModule {
     private static final String SCREENSHOT_PACKAGE = "com.oplus.screenshot";
     private static final String GALLERY_PACKAGE = "com.coloros.gallery3d";
     private static final long SHARE_TARGET_NOTIFY_DELAY_MS = 1000L;
@@ -86,33 +86,45 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             };
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        if (!SCREENSHOT_PACKAGE.equals(lpparam.packageName)
-                && !GALLERY_PACKAGE.equals(lpparam.packageName)) {
+    public void onModuleLoaded(ModuleLoadedParam param) {
+        ModuleLog.attach(this);
+        ModuleLog.debug("module loaded in " + param.getProcessName());
+    }
+
+    @Override
+    public void onPackageReady(PackageReadyParam param) {
+        String packageName = param.getPackageName();
+        if (!SCREENSHOT_PACKAGE.equals(packageName)
+                && !GALLERY_PACKAGE.equals(packageName)) {
             return;
         }
 
-        if (lpparam.appInfo == null || lpparam.appInfo.sourceDir == null) {
+        if (param.getApplicationInfo() == null
+                || param.getApplicationInfo().sourceDir == null) {
             ModuleLog.warning("read target APK path failed");
             return;
         }
 
-        if (SCREENSHOT_PACKAGE.equals(lpparam.packageName)) {
-            installScreenshotHooks(lpparam.classLoader, lpparam.appInfo.sourceDir);
+        if (SCREENSHOT_PACKAGE.equals(packageName)) {
+            installScreenshotHooks(this,
+                    param.getClassLoader(), param.getApplicationInfo().sourceDir);
         } else {
-            installGalleryHooks(lpparam.classLoader, lpparam.appInfo.sourceDir);
+            installGalleryHooks(this,
+                    param.getClassLoader(), param.getApplicationInfo().sourceDir);
         }
     }
 
     private static synchronized void installScreenshotHooks(
-            final ClassLoader classLoader, String apkPath) {
+            final XposedInterface framework,
+            final ClassLoader classLoader,
+            String apkPath) {
         if (screenshotHooksInstalled) {
             return;
         }
 
         final Class<?> editorActivity;
         try {
-            editorActivity = XposedHelpers.findClass(
+            editorActivity = findClass(
                     "com.oplus.screenshot.editor.activity.EditorActivity", classLoader);
         } catch (Throwable throwable) {
             ModuleLog.warning("locate Screenshot classes failed", throwable);
@@ -124,58 +136,60 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
         // These are Android lifecycle overrides with stable framework names.
         // Vendor methods, including obfuscated ones, must use the DexKit
-        // bindings below instead of being passed to findAndHookMethod.
-        try {
-            XposedHelpers.findAndHookMethod(
-                    editorActivity,
-                    "onCreate",
-                    Bundle.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            registerEditorActivityReceiver(param.thisObject);
-                        }
-                    });
-        } catch (Throwable throwable) {
-            ModuleLog.warning("hook EditorActivity.onCreate failed", throwable);
-        }
-
-        try {
-            XposedHelpers.findAndHookMethod(
-                    editorActivity,
-                    "onDestroy",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            unregisterEditorActivityReceiver(param.thisObject);
-                        }
-                    });
-        } catch (Throwable throwable) {
-            ModuleLog.warning("hook EditorActivity.onDestroy failed", throwable);
-        }
-
-        hookDexKitMethod(
-                "Screenshot GalleryStartHelper factory",
-                bindings.galleryFactory,
-                new XC_MethodHook() {
+        // bindings below instead of being passed to a name-based hook API.
+        hookMethod(
+                framework,
+                "EditorActivity.onCreate",
+                findMethod(editorActivity, "onCreate", Bundle.class),
+                new XposedInterface.Hooker() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        PendingOrigin pending = peekPendingOrigin();
-                        Object send = param.getResult();
-                        if (pending != null && pending.uri != null && send != null) {
-                            SEND_ORIGINS.put(send, pending.uri);
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        try {
+                            return chain.proceed();
+                        } finally {
+                            registerEditorActivityReceiver(chain.getThisObject());
                         }
                     }
                 });
 
+        hookMethod(
+                framework,
+                "EditorActivity.onDestroy",
+                findMethod(editorActivity, "onDestroy"),
+                new XposedInterface.Hooker() {
+                    @Override
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        unregisterEditorActivityReceiver(chain.getThisObject());
+                        return chain.proceed();
+                    }
+                });
+
         hookDexKitMethod(
+                framework,
+                "Screenshot GalleryStartHelper factory",
+                bindings.galleryFactory,
+                new XposedInterface.Hooker() {
+                    @Override
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Object result = chain.proceed();
+                        PendingOrigin pending = peekPendingOrigin();
+                        Object send = result;
+                        if (pending != null && pending.uri != null && send != null) {
+                            SEND_ORIGINS.put(send, pending.uri);
+                        }
+                        return result;
+                    }
+                });
+
+        hookDexKitMethod(
+                framework,
                 "Screenshot SendMenuAction share action",
                 bindings.sendAction,
-                new XC_MethodHook() {
+                new XposedInterface.Hooker() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        Uri origin = readScreenshotOrigin(param.thisObject, bindings);
-                        Object activity = getActionActivity(param.thisObject, bindings);
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Uri origin = readScreenshotOrigin(chain.getThisObject(), bindings);
+                        Object activity = getActionActivity(chain.getThisObject(), bindings);
                         if (activity != null) {
                             registerEditorActivityReceiver(activity);
                             if (origin != null) {
@@ -183,33 +197,36 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                             }
                         }
                         PENDING_ORIGINS.get().push(new PendingOrigin(origin));
-                    }
-
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        ArrayDeque<PendingOrigin> stack = PENDING_ORIGINS.get();
-                        if (!stack.isEmpty()) {
-                            stack.pop();
-                        }
-                        if (stack.isEmpty()) {
-                            PENDING_ORIGINS.remove();
+                        try {
+                            return chain.proceed();
+                        } finally {
+                            ArrayDeque<PendingOrigin> stack = PENDING_ORIGINS.get();
+                            if (!stack.isEmpty()) {
+                                stack.pop();
+                            }
+                            if (stack.isEmpty()) {
+                                PENDING_ORIGINS.remove();
+                            }
                         }
                     }
                 });
 
         hookDexKitMethod(
+                framework,
                 "Screenshot GalleryStartHelper.Send intent builder",
                 bindings.sendIntent,
-                new XC_MethodHook() {
+                new XposedInterface.Hooker() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        Uri origin = SEND_ORIGINS.get(param.thisObject);
-                        Intent intent = param.args.length > 0 && param.args[0] instanceof Intent
-                                ? (Intent) param.args[0]
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Uri origin = SEND_ORIGINS.get(chain.getThisObject());
+                        List<Object> args = chain.getArgs();
+                        Intent intent = args.size() > 0 && args.get(0) instanceof Intent
+                                ? (Intent) args.get(0)
                                 : null;
                         if (origin != null && intent != null) {
                             intent.putExtra(EXTRA_ORIGIN_URI, origin.toString());
                         }
+                        return chain.proceed();
                     }
                 });
 
@@ -233,31 +250,37 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
     private static boolean isSelectedShareTargetLaunch(
             Class<?> screenShotShareActivity,
-            XC_MethodHook.MethodHookParam param) {
-        if (param == null || param.getThrowable() != null
-                || !(param.thisObject instanceof Context)
-                || !screenShotShareActivity.isInstance(param.thisObject)
-                || param.args.length < 2
-                || !(param.args[0] instanceof Intent)
-                || !(param.args[1] instanceof Integer)
-                || ((Integer) param.args[1]).intValue() != -1) {
+            XposedInterface.Chain chain) {
+        if (chain == null) {
+            return false;
+        }
+        List<Object> args = chain.getArgs();
+        Object thisObject = chain.getThisObject();
+        if (!(thisObject instanceof Context)
+                || !screenShotShareActivity.isInstance(thisObject)
+                || args.size() < 2
+                || !(args.get(0) instanceof Intent)
+                || !(args.get(1) instanceof Integer)
+                || ((Integer) args.get(1)).intValue() != -1) {
             return false;
         }
 
         // The Gallery resolver assigns the selected target component before
         // calling Activity.startActivity(...). This filters out unrelated
         // lifecycle launches from the share page.
-        return ((Intent) param.args[0]).getComponent() != null;
+        return ((Intent) args.get(0)).getComponent() != null;
     }
 
-    private static XC_MethodHook createShareTargetLaunchHook(
+    private static XposedInterface.Hooker createShareTargetLaunchHook(
             final Class<?> screenShotShareActivity) {
-        return new XC_MethodHook() {
+        return new XposedInterface.Hooker() {
             @Override
-            protected void afterHookedMethod(MethodHookParam param) {
-                if (isSelectedShareTargetLaunch(screenShotShareActivity, param)) {
-                    scheduleScreenshotShareTargetNotification((Activity) param.thisObject);
+            public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                Object result = chain.proceed();
+                if (isSelectedShareTargetLaunch(screenShotShareActivity, chain)) {
+                    scheduleScreenshotShareTargetNotification((Activity) chain.getThisObject());
                 }
+                return result;
             }
         };
     }
@@ -668,17 +691,19 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
     }
 
     private static synchronized void installGalleryHooks(
-            final ClassLoader classLoader, String apkPath) {
+            final XposedInterface framework,
+            final ClassLoader classLoader,
+            String apkPath) {
         if (galleryHooksInstalled) {
             return;
         }
 
-        final Class<?> viewModel;
         final Class<?> galleryShareActivity;
         try {
-            viewModel = XposedHelpers.findClass(
-                    "com.oplus.gallery.sharepage.viewmodel.ShareInnerViewModel", classLoader);
-            galleryShareActivity = XposedHelpers.findClass(
+            // Resolve the view model up front so a package with an unexpected
+            // share-page layout is rejected before any hooks are installed.
+            findClass("com.oplus.gallery.sharepage.viewmodel.ShareInnerViewModel", classLoader);
+            galleryShareActivity = findClass(
                     "com.oplus.gallery.sharepage.GalleryShareActivity", classLoader);
         } catch (Throwable throwable) {
             ModuleLog.warning("locate Gallery classes failed", throwable);
@@ -690,102 +715,109 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
         // These are Android lifecycle overrides with stable framework names.
         // Vendor methods, including obfuscated ones, must use the DexKit
-        // bindings below instead of being passed to findAndHookMethod.
-        try {
-            XposedHelpers.findAndHookMethod(
-                    galleryShareActivity,
-                    "onCreate",
-                    Bundle.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            updateCurrentGalleryOrigin(getActivityIntent(param.thisObject));
-                        }
-                    });
-        } catch (Throwable throwable) {
-            ModuleLog.warning("hook GalleryShareActivity.onCreate failed", throwable);
-        }
+        // bindings below instead of a name-based hook API.
+        hookMethod(
+                framework,
+                "GalleryShareActivity.onCreate",
+                findMethod(galleryShareActivity, "onCreate", Bundle.class),
+                new XposedInterface.Hooker() {
+                    @Override
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        updateCurrentGalleryOrigin(getActivityIntent(chain.getThisObject()));
+                        return chain.proceed();
+                    }
+                });
 
-        try {
-            XposedHelpers.findAndHookMethod(
-                    galleryShareActivity,
-                    "onResume",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            updateCurrentGalleryOrigin(getActivityIntent(param.thisObject));
-                        }
-                    });
-        } catch (Throwable throwable) {
-            ModuleLog.warning("hook GalleryShareActivity.onResume failed", throwable);
-        }
+        hookMethod(
+                framework,
+                "GalleryShareActivity.onResume",
+                findMethod(galleryShareActivity, "onResume"),
+                new XposedInterface.Hooker() {
+                    @Override
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        updateCurrentGalleryOrigin(getActivityIntent(chain.getThisObject()));
+                        return chain.proceed();
+                    }
+                });
 
         try {
             final Class<?> screenShotShareActivity = Class.forName(
                     "com.oplus.gallery.sharepage.ScreenShotShareActivity", false, classLoader);
-            XposedHelpers.findAndHookMethod(
-                    screenShotShareActivity,
-                    "onNewIntent",
-                    Intent.class,
-                    new XC_MethodHook() {
+            hookMethod(
+                    framework,
+                    "ScreenShotShareActivity.onNewIntent",
+                    findMethod(screenShotShareActivity, "onNewIntent", Intent.class),
+                    new XposedInterface.Hooker() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            Intent intent = param.args.length > 0 && param.args[0] instanceof Intent
-                                    ? (Intent) param.args[0]
+                        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                            List<Object> args = chain.getArgs();
+                            Intent intent = args.size() > 0 && args.get(0) instanceof Intent
+                                    ? (Intent) args.get(0)
                                     : null;
                             updateCurrentGalleryOrigin(intent);
+                            return chain.proceed();
                         }
                     });
-            XposedHelpers.findAndHookMethod(
-                    Activity.class,
-                    "startActivityForResult",
-                    Intent.class,
-                    int.class,
+            hookMethod(
+                    framework,
+                    "Activity.startActivityForResult(Intent,int)",
+                    findMethod(Activity.class, "startActivityForResult", Intent.class, int.class),
                     createShareTargetLaunchHook(screenShotShareActivity));
-            XposedHelpers.findAndHookMethod(
-                    Activity.class,
-                    "startActivityForResult",
-                    Intent.class,
-                    int.class,
-                    Bundle.class,
+            hookMethod(
+                    framework,
+                    "Activity.startActivityForResult(Intent,int,Bundle)",
+                    findMethod(
+                            Activity.class,
+                            "startActivityForResult",
+                            Intent.class,
+                            int.class,
+                            Bundle.class),
                     createShareTargetLaunchHook(screenShotShareActivity));
         } catch (Throwable throwable) {
             ModuleLog.warning("hook ScreenShotShareActivity share target launch failed", throwable);
         }
 
         hookDexKitMethod(
+                framework,
                 "Gallery ShareInnerViewModel initializer",
                 bindings.initModel,
-                new XC_MethodHook() {
+                new XposedInterface.Hooker() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        rememberModelOrigin(param.thisObject,
-                                param.args.length > 0 ? param.args[0] : null);
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        List<Object> args = chain.getArgs();
+                        rememberModelOrigin(chain.getThisObject(),
+                                args.size() > 0 ? args.get(0) : null);
+                        return chain.proceed();
                     }
                 });
 
         hookDexKitMethod(
+                framework,
                 "Gallery ShareInnerViewModel delete queue method",
                 bindings.enqueueDelete,
-                new XC_MethodHook() {
+                new XposedInterface.Hooker() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        augmentDeleteQueueArgument(param, bindings);
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        return proceedDeleteQueue(chain, bindings);
                     }
                 });
 
         hookDexKitMethod(
+                framework,
                 "Gallery recycle operation",
                 bindings.recycle,
-                new XC_MethodHook() {
+                new XposedInterface.Hooker() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        List<?> items = param.args.length > 0 && param.args[0] instanceof List
-                                ? (List<?>) param.args[0]
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Object result = chain.proceed();
+                        List<Object> args = chain.getArgs();
+                        List<?> items = args.size() > 0 && args.get(0) instanceof List
+                                ? (List<?>) args.get(0)
                                 : null;
-                        boolean success = param.getResult() instanceof Integer
-                                && ((Integer) param.getResult()).intValue() == 1;
+                        boolean success = result instanceof Integer
+                                && ((Integer) result).intValue() == 1;
                         handleRecycleResult(items, success, bindings);
+                        return result;
                     }
                 });
 
@@ -793,14 +825,17 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         // its existing queue. The actual completion notification is sent only
         // after Gallery's recycle method returns success.
         hookDexKitMethod(
+                framework,
                 "Gallery ShareUtils queue flush",
                 bindings.flushQueue,
-                new XC_MethodHook() {
+                new XposedInterface.Hooker() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (param.args.length > 0 && Boolean.TRUE.equals(param.args[0])) {
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        List<Object> args = chain.getArgs();
+                        if (args.size() > 0 && Boolean.TRUE.equals(args.get(0))) {
                             retryPendingOriginalAtQueueFlush(bindings);
                         }
+                        return chain.proceed();
                     }
                 });
 
@@ -808,22 +843,23 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         ModuleLog.debug("Gallery hooks installed");
     }
 
-    private static void augmentDeleteQueueArgument(
-            XC_MethodHook.MethodHookParam param,
-            DexKitResolver.GalleryBindings bindings) {
-        if (param.args.length == 0 || !(param.args[0] instanceof Set)) {
-            return;
+    private static Object proceedDeleteQueue(
+            XposedInterface.Chain chain,
+            DexKitResolver.GalleryBindings bindings) throws Throwable {
+        List<Object> args = chain.getArgs();
+        if (args.size() == 0 || !(args.get(0) instanceof Set)) {
+            return chain.proceed();
         }
 
         // This is the same mode check used by Gallery's original method. It
         // prevents a stale Screenshot URI from affecting a normal Gallery share.
-        if (!isGalleryShareDeleteMode(param.thisObject, bindings)) {
-            return;
+        if (!isGalleryShareDeleteMode(chain.getThisObject(), bindings)) {
+            return chain.proceed();
         }
 
-        String originString = getModelOrigin(param.thisObject, bindings);
+        String originString = getModelOrigin(chain.getThisObject(), bindings);
         if (originString == null) {
-            return;
+            return chain.proceed();
         }
 
         Uri originUri;
@@ -831,23 +867,23 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             originUri = Uri.parse(originString);
         } catch (Throwable throwable) {
             ModuleLog.warning("parse original URI failed", throwable);
-            return;
+            return chain.proceed();
         }
 
-        Set<?> selectedItems = (Set<?>) param.args[0];
-        Object modelActivity = getModelActivity(param.thisObject);
+        Set<?> selectedItems = (Set<?>) args.get(0);
+        Object modelActivity = getModelActivity(chain.getThisObject());
         armPendingDelete(originUri, modelActivity);
-        Intent shareIntent = getViewModelShareIntent(param.thisObject, bindings);
+        Intent shareIntent = getViewModelShareIntent(chain.getThisObject(), bindings);
         String mimeType = shareIntent == null ? null : shareIntent.getType();
         Object originPath = resolveGalleryPath(bindings, modelActivity, originUri, mimeType);
         if (originPath == null) {
             ModuleLog.warning("Gallery could not resolve original URI " + originUri);
-            return;
+            return chain.proceed();
         }
         rememberPendingDeletePath(originPath);
 
         if (containsOriginal(selectedItems, originPath, originUri, bindings)) {
-            return;
+            return chain.proceed();
         }
 
         // ShareInnerViewModel's method only queues paths and persists that
@@ -855,8 +891,10 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         LinkedHashSet<Object> queueItems = new LinkedHashSet<Object>();
         queueItems.addAll(selectedItems);
         queueItems.add(originPath);
-        param.args[0] = queueItems;
+        Object[] updatedArgs = args.toArray(new Object[0]);
+        updatedArgs[0] = queueItems;
         ModuleLog.debug("original added to Gallery delete queue at share time");
+        return chain.proceed(updatedArgs);
     }
 
     private static boolean isGalleryShareDeleteMode(
@@ -1348,19 +1386,61 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         return stack.isEmpty() ? null : stack.peek();
     }
 
+    private static Class<?> findClass(String className, ClassLoader classLoader)
+            throws ClassNotFoundException {
+        return Class.forName(className, false, classLoader);
+    }
+
+    private static Method findMethod(
+            Class<?> type, String name, Class<?>... parameterTypes) {
+        try {
+            Method method = type.getDeclaredMethod(name, parameterTypes);
+            try {
+                method.setAccessible(true);
+            } catch (Throwable ignored) {
+                // The framework may still be able to hook an inaccessible
+                // method, so do not discard an otherwise exact match.
+            }
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return null;
+        }
+    }
+
+    private static void hookMethod(
+            XposedInterface framework,
+            String label,
+            Method method,
+            XposedInterface.Hooker hooker) {
+        if (method == null) {
+            ModuleLog.warning("hook " + label + " skipped: method not found");
+            return;
+        }
+        try {
+            framework.hook(method)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(hooker);
+        } catch (Throwable throwable) {
+            ModuleLog.warning("hook " + label + " failed", throwable);
+        }
+    }
+
     /**
      * Hooks only a method resolved from the target DEX by DexKit. Do not add
-     * obfuscated method names to the direct XposedHelpers hooks above.
+     * obfuscated method names to the direct lifecycle hooks above.
      */
     private static void hookDexKitMethod(
+            XposedInterface framework,
             String label,
             DexKitResolver.MethodBinding binding,
-            XC_MethodHook hook) {
+            XposedInterface.Hooker hooker) {
         if (binding == null) {
             return;
         }
         try {
-            XposedBridge.hookMethod(binding.method, hook);
+            framework.hook(binding.method)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(hooker);
         } catch (Throwable throwable) {
             ModuleLog.warning("hook " + label + " failed", throwable);
         }

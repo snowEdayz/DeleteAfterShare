@@ -1,6 +1,6 @@
 # Delete After Share
 
-这是一个 Xposed Legacy 模块，同时适配本次提供的新旧 APK 版本：
+这是一个使用 Modern Xposed API 102 的模块，同时适配本次提供的新旧 APK 版本：
 
 - `com.oplus.screenshot`
 - `com.coloros.gallery3d`
@@ -15,9 +15,11 @@
 
 ## 安装
 
-1. 在 Xposed Legacy 或兼容实现中安装构建出的 APK。
+1. 在支持 Modern Xposed API 的 LSPosed/兼容实现中安装构建出的 APK。
 2. 对 `com.oplus.screenshot` 和 `com.coloros.gallery3d` 启用模块。
 3. 重启这两个应用，必要时重启系统。
+
+Modern Xposed API 102 的最低 Android 版本为 8.0（API 26）。
 
 模块以当前提供的新旧 APK 为基线。图库新版本迁移了内部路径/数据模型类型，模块会根据运行时实际 DEX 中的类型图选择对应解析；截图新旧基线相同。系统更新或 APK 变化后，需要重新提供对应 APK 并检查反编译逻辑。
 
@@ -29,4 +31,8 @@
 
 本项目不要求本地构建。GitHub Actions 会在每次 push 时构建 Release APK，并更新固定的 `pre-release` prerelease tag；APK 会作为该 release 的 asset 上传并覆盖同名旧文件。
 
-工作流使用 Xposed API 82 的 `compileOnly` 依赖，模块本身不把 Xposed API 打进 APK。
+工作流使用 `io.github.libxposed:api:102.0.0` 的 `compileOnly` 依赖，模块本身不把 Xposed API 打进 APK。
+
+模块入口和作用域分别声明在 `app/src/main/resources/META-INF/xposed/java_init.list`
+和 `scope.list`，模块配置在 `module.prop`；不再使用 Legacy 的 `assets/xposed_init`
+或 Manifest `xposed*` 元数据。

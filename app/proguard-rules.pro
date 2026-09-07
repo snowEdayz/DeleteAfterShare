@@ -1,1 +1,6 @@
-# The module entry point is loaded reflectively by Xposed.
+# Modern Xposed module entry point and resource registration.
+-dontwarn io.github.libxposed.annotation.**
+-adaptresourcefilecontents META-INF/xposed/java_init.list
+-keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
+    public <init>();
+}
