@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Delete After Share</string>
-    <string name="xposed_description">Share from Oplus Screenshot, then recycle the original image with Gallery's existing share deletion timing.</string>
+    <string name="xposed_description">Share from Oplus Screenshot, then recycle the original image with Gallery existing share deletion timing.</string>
 </resources>
