@@ -88,7 +88,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             XposedHelpers.findAndHookMethod(
                     galleryStartHelper,
-                    "m12111b",
+                    "b",
                     Context.class,
                     new XC_MethodHook() {
                         @Override
@@ -101,13 +101,13 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook GalleryStartHelper.m12111b", throwable);
+            logFailure("hook GalleryStartHelper.b", throwable);
         }
 
         try {
             XposedHelpers.findAndHookMethod(
                     sendMenuAction,
-                    "m11354y",
+                    "y",
                     Uri.class,
                     new XC_MethodHook() {
                         @Override
@@ -128,13 +128,13 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook SendMenuAction.m11354y", throwable);
+            logFailure("hook SendMenuAction.y", throwable);
         }
 
         try {
             XposedHelpers.findAndHookMethod(
                     gallerySend,
-                    "m12129r",
+                    "r",
                     Intent.class,
                     Uri.class,
                     new XC_MethodHook() {
@@ -150,7 +150,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook GalleryStartHelper.Send.m12129r", throwable);
+            logFailure("hook GalleryStartHelper.Send.r", throwable);
         }
 
         XposedBridge.log(TAG + ": Screenshot hooks installed");
@@ -227,7 +227,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             XposedHelpers.findAndHookMethod(
                     viewModel,
-                    "m33824a0",
+                    "a0",
                     baseActivity,
                     new XC_MethodHook() {
                         @Override
@@ -237,13 +237,13 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook ShareInnerViewModel.m33824a0", throwable);
+            logFailure("hook ShareInnerViewModel.a0", throwable);
         }
 
         try {
             XposedHelpers.findAndHookMethod(
                     viewModel,
-                    "m33828e0",
+                    "e0",
                     Set.class,
                     new XC_MethodHook() {
                         @Override
@@ -252,17 +252,17 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook ShareInnerViewModel.m33828e0", throwable);
+            logFailure("hook ShareInnerViewModel.e0", throwable);
         }
 
-        // If LocalSource is still catching up when m33828e0 runs, retry the
+        // If LocalSource is still catching up when ShareInnerViewModel.e0 runs, retry the
         // conversion at the exact point Gallery flushes its existing queue.
         try {
             Class<?> shareUtils = XposedHelpers.findClass(
                     "com.oplus.gallery.business_lib.util.ShareUtils", classLoader);
             XposedHelpers.findAndHookMethod(
                     shareUtils,
-                    "m29558c",
+                    "c",
                     Boolean.TYPE,
                     new XC_MethodHook() {
                         @Override
@@ -282,7 +282,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable throwable) {
-            logFailure("hook ShareUtils.m29558c", throwable);
+            logFailure("hook ShareUtils.c", throwable);
         }
 
         XposedBridge.log(TAG + ": Gallery hooks installed");
@@ -330,7 +330,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // m33828e0 only queues paths and persists the queue. Passing a copy is
+        // ShareInnerViewModel.e0 only queues paths and persists the queue. Passing a copy is
         // essential: the caller's real selection must still share the edited
         // image only.
         LinkedHashSet<Object> queueItems = new LinkedHashSet<Object>();
@@ -342,7 +342,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
     private static boolean isGalleryShareDeleteMode(Object viewModel) {
         try {
-            return XposedHelpers.getBooleanField(viewModel, "f73508J0");
+            return XposedHelpers.getBooleanField(viewModel, "J0");
         } catch (Throwable ignored) {
             // Keep the hook usable if a vendor patch changes only this field.
             return true;
@@ -351,15 +351,19 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
     private static Uri readScreenshotOrigin(Object action) {
         try {
-            Object info = XposedHelpers.callMethod(action, "getInfo");
+            // SaveMenuAction.getInfo is JADX's source-level name; the DEX
+            // member is the Kotlin metadata name "o".
+            Object info = XposedHelpers.callMethod(action, "o");
             if (info == null) {
                 return null;
             }
-            Object imageInfo = XposedHelpers.callMethod(info, "getImageInfo");
+            // BaseEditorInfo.getImageInfo is the DEX member "o".
+            Object imageInfo = XposedHelpers.callMethod(info, "o");
             if (imageInfo == null) {
                 return null;
             }
-            Object origin = XposedHelpers.callMethod(imageInfo, "getOriginUri");
+            // ImageInfo.getOriginUri is the DEX member "f".
+            Object origin = XposedHelpers.callMethod(imageInfo, "f");
             return origin instanceof Uri ? (Uri) origin : null;
         } catch (Throwable throwable) {
             logFailure("read Screenshot original URI", throwable);
@@ -428,7 +432,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             Class<?> dataManager = Class.forName(
                     "com.oplus.aiunit.vision.f86", false, classLoader);
-            Method fromUri = dataManager.getDeclaredMethod("m11493c", Uri.class, String.class);
+            Method fromUri = dataManager.getDeclaredMethod("c", Uri.class, String.class);
             fromUri.setAccessible(true);
             Object path = fromUri.invoke(null, originUri, mimeType);
             if (path == null && mimeType != null) {
@@ -446,7 +450,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             Class<?> localMediaHelper = Class.forName(
                     "com.oplus.aiunit.vision.ukd", false, classLoader);
-            Method preload = localMediaHelper.getDeclaredMethod("m24030o", Uri.class);
+            Method preload = localMediaHelper.getDeclaredMethod("o", Uri.class);
             preload.setAccessible(true);
             Object mediaItem = preload.invoke(null, originUri);
             return getMediaObjectPath(mediaItem);
@@ -463,7 +467,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             long mediaId = ContentUris.parseId(originUri);
             Method queryByMediaId = findMethod(
-                    activity.getClass(), "m33733S0", Long.TYPE, Uri.class);
+                    activity.getClass(), "S0", Long.TYPE, Uri.class);
             if (queryByMediaId == null) {
                 return null;
             }
@@ -500,7 +504,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             Class<?> localMediaHelper = Class.forName(
                     "com.oplus.aiunit.vision.ukd", false, classLoader);
             Method pathFromFile = localMediaHelper.getDeclaredMethod(
-                    "m24026k", String.class);
+                    "k", String.class);
             pathFromFile.setAccessible(true);
             return pathFromFile.invoke(null, filePath);
         } catch (Throwable ignored) {
@@ -521,10 +525,11 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             long mediaId = ContentUris.parseId(originUri);
             Class<?> mediaSync = Class.forName(
                     "com.oplus.aiunit.vision.xj1", false, classLoader);
-            Object syncManager = XposedHelpers.callStaticMethod(mediaSync, "m25990i");
+            Object syncManager = XposedHelpers.callStaticMethod(mediaSync, "i");
             if (syncManager != null) {
                 XposedHelpers.callMethod(
-                        syncManager, "mo28749l", (Object) new long[]{mediaId});
+                        // IMediaDBSyncDM.mo28749l is the DEX member "l".
+                        syncManager, "l", (Object) new long[]{mediaId});
             }
         } catch (Throwable throwable) {
             XposedBridge.log(TAG + ": request Gallery media DB refresh failed: " + throwable);
@@ -548,7 +553,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             return null;
         }
         try {
-            return XposedHelpers.getObjectField(mediaItem, "f60319b");
+            return XposedHelpers.getObjectField(mediaItem, "b");
         } catch (Throwable ignored) {
             return null;
         }
@@ -599,7 +604,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         try {
             Class<?> shareUtils = Class.forName(
                     "com.oplus.gallery.business_lib.util.ShareUtils", false, classLoader);
-            Object queueObject = XposedHelpers.getStaticObjectField(shareUtils, "f61533b");
+            Object queueObject = XposedHelpers.getStaticObjectField(shareUtils, "b");
             if (!(queueObject instanceof java.util.List)) {
                 return;
             }
@@ -640,7 +645,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     "com.oplus.aiunit.vision.f86", false, classLoader);
             Class<?> pathClass = Class.forName(
                     "com.oplus.aiunit.vision.p3h", false, classLoader);
-            Method toUri = dataManager.getDeclaredMethod("m11494d", pathClass);
+            Method toUri = dataManager.getDeclaredMethod("d", pathClass);
             toUri.setAccessible(true);
             for (Object selectedItem : selectedItems) {
                 if (selectedItem == null) {
@@ -701,7 +706,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             return null;
         }
         try {
-            Object value = XposedHelpers.getObjectField(viewModel, "f73518U");
+            Object value = XposedHelpers.getObjectField(viewModel, "U");
             return value instanceof Intent ? (Intent) value : null;
         } catch (Throwable ignored) {
             return null;
