@@ -19,8 +19,10 @@ import org.luckypray.dexkit.result.MethodData;
 /**
  * Resolves vendor members from the supplied APK's actual DEX definitions.
  *
- * No obfuscated member name is used as a hook target. A result is accepted only
- * when its class, complete parameter list, return type, and any additional
+ * No obfuscated member name is used as a hook target. Stable Android lifecycle
+ * overrides are hooked directly by the entry point, but every vendor method
+ * and field is resolved from the target DEX. A result is accepted only when
+ * its class, complete parameter list, return type, and any additional
  * relationship constraints identify exactly one DEX method or field.
  */
 final class DexKitResolver {

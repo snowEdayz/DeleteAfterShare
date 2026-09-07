@@ -110,6 +110,9 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         final DexKitResolver.ScreenshotBindings bindings =
                 DexKitResolver.resolveScreenshot(apkPath, classLoader);
 
+        // These are Android lifecycle overrides with stable framework names.
+        // Vendor methods, including obfuscated ones, must use the DexKit
+        // bindings below instead of being passed to findAndHookMethod.
         try {
             XposedHelpers.findAndHookMethod(
                     editorActivity,
@@ -139,7 +142,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             logFailure("hook EditorActivity.onDestroy", throwable);
         }
 
-        hookMethod(
+        hookDexKitMethod(
                 "Screenshot GalleryStartHelper factory",
                 bindings.galleryFactory,
                 new XC_MethodHook() {
@@ -153,7 +156,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     }
                 });
 
-        hookMethod(
+        hookDexKitMethod(
                 "Screenshot SendMenuAction share action",
                 bindings.sendAction,
                 new XC_MethodHook() {
@@ -180,7 +183,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     }
                 });
 
-        hookMethod(
+        hookDexKitMethod(
                 "Screenshot GalleryStartHelper.Send intent builder",
                 bindings.sendIntent,
                 new XC_MethodHook() {
@@ -312,6 +315,9 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         final DexKitResolver.GalleryBindings bindings =
                 DexKitResolver.resolveGallery(apkPath, classLoader);
 
+        // These are Android lifecycle overrides with stable framework names.
+        // Vendor methods, including obfuscated ones, must use the DexKit
+        // bindings below instead of being passed to findAndHookMethod.
         try {
             XposedHelpers.findAndHookMethod(
                     galleryShareActivity,
@@ -361,7 +367,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             logFailure("hook ScreenShotShareActivity.onNewIntent", throwable);
         }
 
-        hookMethod(
+        hookDexKitMethod(
                 "Gallery ShareInnerViewModel initializer",
                 bindings.initModel,
                 new XC_MethodHook() {
@@ -372,7 +378,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     }
                 });
 
-        hookMethod(
+        hookDexKitMethod(
                 "Gallery ShareInnerViewModel delete queue method",
                 bindings.enqueueDelete,
                 new XC_MethodHook() {
@@ -382,7 +388,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     }
                 });
 
-        hookMethod(
+        hookDexKitMethod(
                 "Gallery recycle operation",
                 bindings.recycle,
                 new XC_MethodHook() {
@@ -400,7 +406,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         // Retry the URI-to-path conversion immediately before Gallery flushes
         // its existing queue. The actual completion notification is sent only
         // after Gallery's recycle method returns success.
-        hookMethod(
+        hookDexKitMethod(
                 "Gallery ShareUtils queue flush",
                 bindings.flushQueue,
                 new XC_MethodHook() {
@@ -954,7 +960,11 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         return stack.isEmpty() ? null : stack.peek();
     }
 
-    private static void hookMethod(
+    /**
+     * Hooks only a method resolved from the target DEX by DexKit. Do not add
+     * obfuscated method names to the direct XposedHelpers hooks above.
+     */
+    private static void hookDexKitMethod(
             String label,
             DexKitResolver.MethodBinding binding,
             XC_MethodHook hook) {
