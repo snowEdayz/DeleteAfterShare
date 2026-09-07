@@ -35,7 +35,6 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * Gallery selection remain unchanged.
  */
 public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
-    private static final String TAG = "DeleteAfterShare";
     private static final String SCREENSHOT_PACKAGE = "com.oplus.screenshot";
     private static final String GALLERY_PACKAGE = "com.coloros.gallery3d";
 
@@ -198,7 +197,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 });
 
         screenshotHooksInstalled = true;
-        XposedBridge.log(TAG + ": Screenshot hooks installed");
+        ModuleLog.log("Screenshot hooks installed");
     }
 
     private static Object getActionActivity(
@@ -252,7 +251,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
                 Activity editor = (Activity) target;
                 if (!editor.isFinishing()) {
-                    XposedBridge.log(TAG + ": both images deleted; removing EditorActivity task");
+                    ModuleLog.log("both images deleted; removing EditorActivity task");
                     editor.finishAndRemoveTask();
                 }
             }
@@ -414,7 +413,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 });
 
         galleryHooksInstalled = true;
-        XposedBridge.log(TAG + ": Gallery hooks installed");
+        ModuleLog.log("Gallery hooks installed");
     }
 
     private static void augmentDeleteQueueArgument(
@@ -450,7 +449,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         String mimeType = shareIntent == null ? null : shareIntent.getType();
         Object originPath = resolveGalleryPath(bindings, modelActivity, originUri, mimeType);
         if (originPath == null) {
-            XposedBridge.log(TAG + ": Gallery could not resolve original URI " + originUri);
+            ModuleLog.warning("Gallery could not resolve original URI " + originUri);
             return;
         }
         rememberPendingDeletePath(originPath);
@@ -465,7 +464,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         queueItems.addAll(selectedItems);
         queueItems.add(originPath);
         param.args[0] = queueItems;
-        XposedBridge.log(TAG + ": original added to Gallery delete queue at share time");
+        ModuleLog.log("original added to Gallery delete queue at share time");
     }
 
     private static boolean isGalleryShareDeleteMode(
@@ -555,8 +554,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             return path;
         }
 
-        XposedBridge.log(TAG + ": original URI did not resolve to a local Gallery item: "
-                + originUri);
+        ModuleLog.warning("original URI did not resolve to a local Gallery item: " + originUri);
         return null;
     }
 
@@ -572,8 +570,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             }
             return path;
         } catch (Throwable throwable) {
-            XposedBridge.log(TAG + ": resolve original URI in Gallery DataManager failed: "
-                    + throwable);
+            ModuleLog.warning("resolve original URI in Gallery DataManager failed", throwable);
             return null;
         }
     }
@@ -657,7 +654,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 invoke(bindings.mediaSync, syncManager, (Object) new long[]{mediaId});
             }
         } catch (Throwable throwable) {
-            XposedBridge.log(TAG + ": request Gallery media DB refresh failed: " + throwable);
+            ModuleLog.warning("request Gallery media DB refresh failed", throwable);
         }
     }
 
@@ -723,7 +720,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
         Object originPath = resolveGalleryPath(bindings, activity, originUri, null);
         if (!isLocalItemPath(originPath)) {
-            XposedBridge.log(TAG + ": original still has no local Gallery path at queue flush: "
+            ModuleLog.warning("original still has no local Gallery path at queue flush: "
                     + originUri);
             return;
         }
@@ -740,7 +737,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     @SuppressWarnings("unchecked")
                     List<Object> mutableQueue = (List<Object>) queueObject;
                     mutableQueue.add(originPath);
-                    XposedBridge.log(TAG + ": original added during Gallery queue flush");
+                    ModuleLog.log("original added during Gallery queue flush");
                 }
             }
         } catch (Throwable throwable) {
@@ -775,7 +772,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             boolean bothImagesWereQueued = items.size() > 1;
             clearPendingDelete();
             if (!success || !bothImagesWereQueued) {
-                XposedBridge.log(TAG + ": recycle did not confirm both screenshot images");
+                ModuleLog.warning("recycle did not confirm both screenshot images");
                 return;
             }
         }
@@ -824,7 +821,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             intent.setPackage(SCREENSHOT_PACKAGE);
             intent.putExtra(EXTRA_DELETE_ORIGIN, originUri.toString());
             application.sendBroadcast(intent);
-            XposedBridge.log(TAG + ": deletion completion sent to Screenshot");
+            ModuleLog.log("deletion completion sent to Screenshot");
         } catch (Throwable throwable) {
             logFailure("notify Screenshot deletion completion", throwable);
         }
@@ -978,8 +975,11 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
     }
 
     private static void logFailure(String operation, Throwable throwable) {
-        XposedBridge.log(TAG + ": " + operation + " failed"
-                + (throwable == null ? "" : ": " + throwable));
+        if (throwable == null) {
+            ModuleLog.warning(operation + " failed");
+        } else {
+            ModuleLog.warning(operation + " failed", throwable);
+        }
     }
 
     private static final class PendingOrigin {

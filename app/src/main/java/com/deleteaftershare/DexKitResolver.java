@@ -7,7 +7,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-import de.robv.android.xposed.XposedBridge;
 import org.luckypray.dexkit.DexKitBridge;
 import org.luckypray.dexkit.query.FindField;
 import org.luckypray.dexkit.query.FindMethod;
@@ -25,13 +24,11 @@ import org.luckypray.dexkit.result.MethodData;
  * relationship constraints identify exactly one DEX method or field.
  */
 final class DexKitResolver {
-    private static final String TAG = "DeleteAfterShare";
-
     static {
         try {
             System.loadLibrary("dexkit");
         } catch (Throwable throwable) {
-            XposedBridge.log(TAG + ": load DexKit native library failed: " + throwable);
+            ModuleLog.warning("load DexKit native library failed", throwable);
         }
     }
 
@@ -467,8 +464,7 @@ final class DexKitResolver {
                 return null;
             }
             method.setAccessible(true);
-            XposedBridge.log(TAG + ": DexKit resolved " + label + " -> "
-                    + data.getDescriptor());
+            ModuleLog.log("DexKit resolved " + label + " -> " + data.getDescriptor());
             return new MethodBinding(method, data.getDescriptor());
         } catch (Throwable throwable) {
             logFailure(label, throwable);
@@ -494,8 +490,7 @@ final class DexKitResolver {
                 return null;
             }
             field.setAccessible(true);
-            XposedBridge.log(TAG + ": DexKit resolved " + label + " -> "
-                    + data.getDescriptor());
+            ModuleLog.log("DexKit resolved " + label + " -> " + data.getDescriptor());
             return new FieldBinding(field, data.getDescriptor());
         } catch (Throwable throwable) {
             logFailure(label, throwable);
@@ -505,8 +500,7 @@ final class DexKitResolver {
 
     private static void logCandidates(String label, int count, List<?> matches) {
         StringBuilder message = new StringBuilder();
-        message.append(TAG)
-                .append(": DexKit skipped ")
+        message.append("DexKit skipped ")
                 .append(label)
                 .append("; expected exactly one result, got ")
                 .append(count);
@@ -527,7 +521,7 @@ final class DexKitResolver {
             }
             message.append(']');
         }
-        XposedBridge.log(message.toString());
+        ModuleLog.warning(message.toString());
     }
 
     private static void close(DexKitBridge bridge) {
@@ -542,7 +536,10 @@ final class DexKitResolver {
     }
 
     private static void logFailure(String operation, Throwable throwable) {
-        XposedBridge.log(TAG + ": " + operation + " failed"
-                + (throwable == null ? "" : ": " + throwable));
+        if (throwable == null) {
+            ModuleLog.warning(operation + " failed");
+        } else {
+            ModuleLog.warning(operation + " failed", throwable);
+        }
     }
 }
