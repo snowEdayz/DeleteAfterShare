@@ -254,8 +254,11 @@ final class DexKitResolver {
             // keeping the share-page classes stable. Select the type graph
             // from the APK loaded in this process instead of assuming that the
             // old obfuscated names are still present.
+            // q7b exists in both APKs but represents different classes. The
+            // old build's q7b is an unrelated Lambda, so use the migrated
+            // path class, which is unique to the new Gallery model.
             boolean newGalleryModel = hasClass(
-                    classLoader, "com.oplus.aiunit.vision.q7b");
+                    classLoader, "com.oplus.aiunit.vision.dst");
             String pathClass = newGalleryModel
                     ? "com.oplus.aiunit.vision.dst"
                     : "com.oplus.aiunit.vision.p3h";
