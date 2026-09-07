@@ -42,6 +42,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
     private static final String SCREENSHOT_PACKAGE = "com.oplus.screenshot";
     private static final String GALLERY_PACKAGE = "com.coloros.gallery3d";
+    private static final long SHARE_TARGET_NOTIFY_DELAY_MS = 1000L;
 
     private static final String EXTRA_ORIGIN_URI =
             "com.deleteaftershare.extra.ORIGIN_URI";
@@ -255,29 +256,54 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 if (isSelectedShareTargetLaunch(screenShotShareActivity, param)) {
-                    notifyScreenshotShareTargetLaunched((Context) param.thisObject);
+                    scheduleScreenshotShareTargetNotification((Activity) param.thisObject);
                 }
             }
         };
     }
 
-    private static void notifyScreenshotShareTargetLaunched(Context galleryActivity) {
+    private static void scheduleScreenshotShareTargetNotification(final Activity galleryActivity) {
+        final Context notificationContext;
+        try {
+            Context application = galleryActivity.getApplicationContext();
+            notificationContext = application != null ? application : galleryActivity;
+        } catch (Throwable throwable) {
+            logFailure("read Gallery application context for delayed share signal", throwable);
+            return;
+        }
+
+        final int taskId;
+        try {
+            taskId = galleryActivity.getTaskId();
+        } catch (Throwable throwable) {
+            logFailure("read Gallery share task id for delayed share signal", throwable);
+            return;
+        }
+
+        Intent source = galleryActivity.getIntent();
+        final String origin = source == null
+                ? null : source.getStringExtra(EXTRA_ORIGIN_URI);
+        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                notifyScreenshotShareTargetLaunched(notificationContext, taskId, origin);
+            }
+        }, SHARE_TARGET_NOTIFY_DELAY_MS);
+        ModuleLog.log("Gallery share target launched; delayed Screenshot notification by "
+                + SHARE_TARGET_NOTIFY_DELAY_MS + "ms");
+    }
+
+    private static void notifyScreenshotShareTargetLaunched(
+            Context galleryContext, int taskId, String origin) {
         try {
             Intent signal = new Intent(ACTION_SHARE_TARGET_LAUNCHED);
             signal.setPackage(SCREENSHOT_PACKAGE);
-            if (galleryActivity instanceof Activity) {
-                Activity activity = (Activity) galleryActivity;
-                signal.putExtra(EXTRA_SHARE_TASK_ID, activity.getTaskId());
-                Intent source = activity.getIntent();
-                if (source != null) {
-                    String origin = source.getStringExtra(EXTRA_ORIGIN_URI);
-                    if (origin != null) {
-                        signal.putExtra(EXTRA_ORIGIN_URI, origin);
-                    }
-                }
+            signal.putExtra(EXTRA_SHARE_TASK_ID, taskId);
+            if (origin != null) {
+                signal.putExtra(EXTRA_ORIGIN_URI, origin);
             }
-            galleryActivity.sendBroadcast(signal);
-            ModuleLog.log("Gallery share target launched; notified Screenshot process");
+            galleryContext.sendBroadcast(signal);
+            ModuleLog.log("Gallery share target launched; notified Screenshot process after delay");
         } catch (Throwable throwable) {
             logFailure("notify Screenshot after Gallery share target launch", throwable);
         }
