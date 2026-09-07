@@ -2,6 +2,9 @@ plugins {
     id "com.android.application"
 }
 
+def releaseStoreFile = System.getenv("RELEASE_STORE_FILE")
+def releaseSigningConfigured = releaseStoreFile != null && !releaseStoreFile.trim().isEmpty()
+
 android {
     namespace "com.deleteaftershare"
     compileSdk 35
@@ -19,8 +22,23 @@ android {
         targetCompatibility JavaVersion.VERSION_1_8
     }
 
+    signingConfigs {
+        release {
+            if (releaseSigningConfigured) {
+                storeFile file(releaseStoreFile)
+                storeType System.getenv("RELEASE_STORE_TYPE") ?: "pkcs12"
+                storePassword System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
