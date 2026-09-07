@@ -24,8 +24,44 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: Build release APK
+      - name: Prepare release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+
+          signing_dir="$RUNNER_TEMP/deleteaftershare-signing"
+          mkdir -p "$signing_dir"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$signing_dir/release.p12"
+          chmod 600 "$signing_dir/release.p12"
+
+          test -s "$signing_dir/release.p12"
+          {
+            echo "RELEASE_STORE_FILE=$signing_dir/release.p12"
+            echo "RELEASE_STORE_TYPE=pkcs12"
+            echo "RELEASE_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "RELEASE_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "RELEASE_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
         run: gradle --no-daemon --stacktrace assembleRelease
+
+      - name: Verify release APK signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$apksigner"
+          "$apksigner" verify app/build/outputs/apk/release/app-release.apk
 
       - name: Move fixed tag and update pre-release
         env:
@@ -54,4 +90,4 @@ jobs:
               --prerelease
           fi
 
-          gh release upload "${TAG_NAME}" app/build/outputs/apk/release/*.apk --clobber
+          gh release upload "${TAG_NAME}" app/build/outputs/apk/release/app-release.apk --clobber
