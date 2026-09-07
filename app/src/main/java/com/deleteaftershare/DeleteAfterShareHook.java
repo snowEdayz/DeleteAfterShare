@@ -1,21 +1,27 @@
 package com.deleteaftershare;
 
+import android.app.Activity;
+import android.content.BroadcastReceiver;
 import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import de.robv.android.xposed.AndroidAppHelper;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -38,9 +44,17 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
     /** String extra keeps the two target class loaders independent. */
     private static final String EXTRA_ORIGIN_URI =
             "com.deleteaftershare.extra.ORIGIN_URI";
+    private static final String ACTION_DELETE_COMPLETE =
+            "com.deleteaftershare.action.DELETE_COMPLETE";
+    private static final String EXTRA_DELETE_ORIGIN =
+            "com.deleteaftershare.extra.DELETE_ORIGIN";
 
     private static final Map<Object, Uri> SEND_ORIGINS =
             Collections.synchronizedMap(new WeakHashMap<Object, Uri>());
+    private static final Map<Object, BroadcastReceiver> EDITOR_ACTIVITY_RECEIVERS =
+            Collections.synchronizedMap(new WeakHashMap<Object, BroadcastReceiver>());
+    private static final Map<Object, String> EDITOR_ACTIVITY_ORIGINS =
+            Collections.synchronizedMap(new WeakHashMap<Object, String>());
     private static final Map<Object, String> GALLERY_MODEL_ORIGINS =
             Collections.synchronizedMap(new WeakHashMap<Object, String>());
     private static final Map<Object, WeakReference<Object>> GALLERY_MODEL_ACTIVITIES =
@@ -50,6 +64,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
     private static final Object PENDING_DELETE_LOCK = new Object();
     private static Uri pendingDeleteOrigin;
     private static WeakReference<Object> pendingDeleteActivity;
+    private static Object pendingDeletePath;
 
     private static final ThreadLocal<ArrayDeque<PendingOrigin>> PENDING_ORIGINS =
             new ThreadLocal<ArrayDeque<PendingOrigin>>() {
@@ -72,6 +87,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         final Class<?> sendMenuAction;
         final Class<?> galleryStartHelper;
         final Class<?> gallerySend;
+        final Class<?> editorActivity;
 
         try {
             sendMenuAction = XposedHelpers.findClass(
@@ -80,9 +96,40 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     "com.oplus.screenshot.global.utils.GalleryStartHelper", classLoader);
             gallerySend = XposedHelpers.findClass(
                     "com.oplus.screenshot.global.utils.GalleryStartHelper$Send", classLoader);
+            editorActivity = XposedHelpers.findClass(
+                    "com.oplus.screenshot.editor.activity.EditorActivity", classLoader);
         } catch (Throwable throwable) {
             logFailure("locate Screenshot classes", throwable);
             return;
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    editorActivity,
+                    "onCreate",
+                    Bundle.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            registerEditorActivityReceiver(param.thisObject);
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook EditorActivity.onCreate", throwable);
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    editorActivity,
+                    "onDestroy",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            unregisterEditorActivityReceiver(param.thisObject);
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook EditorActivity.onDestroy", throwable);
         }
 
         try {
@@ -112,8 +159,14 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            Uri origin = readScreenshotOrigin(param.thisObject);
+                            Object activity = getActionActivity(param.thisObject);
+                            if (origin != null && activity != null) {
+                                rememberEditorActivityOrigin(activity, origin);
+                                registerEditorActivityReceiver(activity);
+                            }
                             PENDING_ORIGINS.get().push(
-                                    new PendingOrigin(readScreenshotOrigin(param.thisObject)));
+                                    new PendingOrigin(origin));
                         }
 
                         @Override
@@ -154,6 +207,94 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         }
 
         XposedBridge.log(TAG + ": Screenshot hooks installed");
+    }
+
+    private static Object getActionActivity(Object action) {
+        try {
+            // SaveMenuAction.getContext is the DEX member "m".
+            Object value = XposedHelpers.callMethod(action, "m");
+            return value instanceof Activity ? value : null;
+        } catch (Throwable throwable) {
+            logFailure("read EditorActivity from SendMenuAction", throwable);
+            return null;
+        }
+    }
+
+    private static void rememberEditorActivityOrigin(Object activity, Uri origin) {
+        if (activity == null || origin == null) {
+            return;
+        }
+        EDITOR_ACTIVITY_ORIGINS.put(activity, origin.toString());
+    }
+
+    private static void registerEditorActivityReceiver(final Object activity) {
+        if (!(activity instanceof Context)) {
+            return;
+        }
+
+        synchronized (EDITOR_ACTIVITY_RECEIVERS) {
+            if (EDITOR_ACTIVITY_RECEIVERS.containsKey(activity)) {
+                return;
+            }
+        }
+
+        final WeakReference<Object> activityReference = new WeakReference<Object>(activity);
+        final BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                Object target = activityReference.get();
+                if (!(target instanceof Activity) || intent == null
+                        || !ACTION_DELETE_COMPLETE.equals(intent.getAction())) {
+                    return;
+                }
+
+                String deletedOrigin = intent.getStringExtra(EXTRA_DELETE_ORIGIN);
+                String expectedOrigin = EDITOR_ACTIVITY_ORIGINS.get(target);
+                if (deletedOrigin == null || expectedOrigin == null
+                        || !deletedOrigin.equals(expectedOrigin)) {
+                    return;
+                }
+
+                Activity editor = (Activity) target;
+                if (!editor.isFinishing()) {
+                    XposedBridge.log(TAG + ": both images deleted; removing EditorActivity task");
+                    editor.finishAndRemoveTask();
+                }
+            }
+        };
+
+        synchronized (EDITOR_ACTIVITY_RECEIVERS) {
+            if (EDITOR_ACTIVITY_RECEIVERS.containsKey(activity)) {
+                return;
+            }
+            EDITOR_ACTIVITY_RECEIVERS.put(activity, receiver);
+        }
+
+        try {
+            IntentFilter filter = new IntentFilter(ACTION_DELETE_COMPLETE);
+            Context context = (Context) activity;
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                context.registerReceiver(receiver, filter);
+            }
+        } catch (Throwable throwable) {
+            EDITOR_ACTIVITY_RECEIVERS.remove(activity);
+            logFailure("register EditorActivity completion receiver", throwable);
+        }
+    }
+
+    private static void unregisterEditorActivityReceiver(Object activity) {
+        EDITOR_ACTIVITY_ORIGINS.remove(activity);
+        BroadcastReceiver receiver = EDITOR_ACTIVITY_RECEIVERS.remove(activity);
+        if (receiver == null || !(activity instanceof Context)) {
+            return;
+        }
+        try {
+            ((Context) activity).unregisterReceiver(receiver);
+        } catch (Throwable throwable) {
+            logFailure("unregister EditorActivity completion receiver", throwable);
+        }
     }
 
     private static void installGalleryHooks(final ClassLoader classLoader) {
@@ -255,6 +396,29 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             logFailure("hook ShareInnerViewModel.e0", throwable);
         }
 
+        try {
+            Class<?> recycleHelper = XposedHelpers.findClass(
+                    "com.oplus.aiunit.vision.q0l", classLoader);
+            XposedHelpers.findAndHookMethod(
+                    recycleHelper,
+                    "b",
+                    List.class,
+                    Boolean.TYPE,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            List<?> items = param.args.length > 0 && param.args[0] instanceof List
+                                    ? (List<?>) param.args[0]
+                                    : null;
+                            boolean success = param.getResult() instanceof Integer
+                                    && ((Integer) param.getResult()).intValue() == 1;
+                            handleRecycleResult(items, success);
+                        }
+                    });
+        } catch (Throwable throwable) {
+            logFailure("hook RecycleHelper.b", throwable);
+        }
+
         // If LocalSource is still catching up when ShareInnerViewModel.e0 runs, retry the
         // conversion at the exact point Gallery flushes its existing queue.
         try {
@@ -270,14 +434,6 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                             if (param.args.length > 0
                                     && Boolean.TRUE.equals(param.args[0])) {
                                 retryPendingOriginalAtQueueFlush(classLoader);
-                            }
-                        }
-
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            if (param.args.length > 0
-                                    && Boolean.TRUE.equals(param.args[0])) {
-                                clearPendingDelete();
                             }
                         }
                     });
@@ -325,6 +481,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": Gallery could not resolve original URI " + originUri);
             return;
         }
+        rememberPendingDeletePath(originPath);
 
         if (containsOriginal(selectedItems, originPath, originUri, classLoader)) {
             return;
@@ -580,6 +737,18 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             pendingDeleteActivity = activity == null
                     ? null
                     : new WeakReference<Object>(activity);
+            pendingDeletePath = null;
+        }
+    }
+
+    private static void rememberPendingDeletePath(Object originPath) {
+        if (!isLocalItemPath(originPath)) {
+            return;
+        }
+        synchronized (PENDING_DELETE_LOCK) {
+            if (pendingDeleteOrigin != null) {
+                pendingDeletePath = originPath;
+            }
         }
     }
 
@@ -600,6 +769,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     + originUri);
             return;
         }
+        rememberPendingDeletePath(originPath);
 
         try {
             Class<?> shareUtils = Class.forName(
@@ -627,6 +797,65 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         synchronized (PENDING_DELETE_LOCK) {
             pendingDeleteOrigin = null;
             pendingDeleteActivity = null;
+            pendingDeletePath = null;
+        }
+    }
+
+    private static void handleRecycleResult(List<?> items, boolean success) {
+        if (items == null) {
+            return;
+        }
+
+        Uri originUri;
+        synchronized (PENDING_DELETE_LOCK) {
+            if (pendingDeleteOrigin == null || pendingDeletePath == null
+                    || !containsQueueItem(items, pendingDeletePath)) {
+                return;
+            }
+
+            originUri = pendingDeleteOrigin;
+            boolean bothImagesWereQueued = items.size() > 1;
+            clearPendingDelete();
+            if (!success || !bothImagesWereQueued) {
+                XposedBridge.log(TAG + ": recycle did not confirm both screenshot images");
+                return;
+            }
+        }
+
+        notifyScreenshotDeletionComplete(originUri);
+    }
+
+    private static boolean containsQueueItem(List<?> items, Object expected) {
+        try {
+            if (items.contains(expected)) {
+                return true;
+            }
+        } catch (Throwable ignored) {
+            // Fall through to the string comparison for vendor list implementations.
+        }
+
+        String expectedValue = String.valueOf(expected);
+        for (Object item : items) {
+            if (item != null && expectedValue.equals(String.valueOf(item))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void notifyScreenshotDeletionComplete(Uri originUri) {
+        try {
+            Context application = AndroidAppHelper.currentApplication();
+            if (application == null || originUri == null) {
+                return;
+            }
+            Intent intent = new Intent(ACTION_DELETE_COMPLETE);
+            intent.setPackage(SCREENSHOT_PACKAGE);
+            intent.putExtra(EXTRA_DELETE_ORIGIN, originUri.toString());
+            application.sendBroadcast(intent);
+            XposedBridge.log(TAG + ": deletion completion sent to Screenshot");
+        } catch (Throwable throwable) {
+            logFailure("notify Screenshot deletion completion", throwable);
         }
     }
 
