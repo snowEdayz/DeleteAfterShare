@@ -342,19 +342,42 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         Runnable finish = new Runnable() {
             @Override
             public void run() {
+                int taskId = -1;
                 try {
+                    taskId = editor.getTaskId();
+                } catch (Throwable throwable) {
+                    logFailure("read EditorActivity task id before share finish", throwable);
+                }
+
+                Context application = null;
+                try {
+                    application = editor.getApplicationContext();
+                } catch (Throwable throwable) {
+                    logFailure("read Screenshot application context before share finish", throwable);
+                }
+
+                try {
+                    // The legacy Gallery share Activity is placed on top of
+                    // this task. Mark the task excluded before finishing its
+                    // Screenshot root, otherwise the launcher can retain a
+                    // black Recents card for the now-finished task.
+                    excludeAppTaskFromRecents(application, taskId);
                     if (!editor.isFinishing()) {
-                        // The Gallery share Activity is launched on top of the
-                        // editor in the legacy build. Finish only this caller
-                        // here so the share UI remains usable; its excluded
-                        // Gallery task then does not leave the editor card in
-                        // Recents.
                         editor.finish();
                         ModuleLog.log("EditorActivity finish requested after share");
                     }
                 } catch (Throwable throwable) {
                     logFailure("finish EditorActivity after share", throwable);
                 }
+
+                final Context retryContext = application;
+                final int retryTaskId = taskId;
+                new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        excludeAppTaskFromRecents(retryContext, retryTaskId);
+                    }
+                }, 200L);
             }
         };
 
@@ -499,6 +522,34 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             removal.run();
         } else {
             editor.runOnUiThread(removal);
+        }
+    }
+
+    private static void excludeAppTaskFromRecents(Context context, int taskId) {
+        if (context == null || taskId < 0) {
+            return;
+        }
+        try {
+            ActivityManager activityManager = (ActivityManager) context.getSystemService(
+                    Context.ACTIVITY_SERVICE);
+            if (activityManager == null) {
+                return;
+            }
+            List<ActivityManager.AppTask> tasks = activityManager.getAppTasks();
+            if (tasks == null) {
+                return;
+            }
+            for (ActivityManager.AppTask task : tasks) {
+                ActivityManager.RecentTaskInfo info = task.getTaskInfo();
+                if (info != null && info.id == taskId) {
+                    task.setExcludeFromRecents(true);
+                    ModuleLog.log("ActivityManager excluded EditorActivity task from Recents, taskId="
+                            + taskId);
+                    return;
+                }
+            }
+        } catch (Throwable throwable) {
+            logFailure("exclude EditorActivity task from Recents", throwable);
         }
     }
 
