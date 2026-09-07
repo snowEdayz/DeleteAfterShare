@@ -47,6 +47,10 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             "com.deleteaftershare.extra.ORIGIN_URI";
     private static final String ACTION_DELETE_COMPLETE =
             "com.deleteaftershare.action.DELETE_COMPLETE";
+    private static final String ACTION_SHARE_TARGET_LAUNCHED =
+            "com.deleteaftershare.action.SHARE_TARGET_LAUNCHED";
+    private static final String EXTRA_SHARE_TASK_ID =
+            "com.deleteaftershare.extra.SHARE_TASK_ID";
     private static final String EXTRA_DELETE_ORIGIN =
             "com.deleteaftershare.extra.DELETE_ORIGIN";
 
@@ -58,8 +62,6 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             Collections.synchronizedMap(new WeakHashMap<Object, ContentObserver>());
     private static final Map<Object, String> EDITOR_ACTIVITY_ORIGINS =
             Collections.synchronizedMap(new WeakHashMap<Object, String>());
-    private static final Map<Object, Boolean> EDITOR_ACTIVITY_SHARE_PENDING =
-            Collections.synchronizedMap(new WeakHashMap<Object, Boolean>());
     private static final Map<Object, String> GALLERY_MODEL_ORIGINS =
             Collections.synchronizedMap(new WeakHashMap<Object, String>());
     private static final Map<Object, WeakReference<Object>> GALLERY_MODEL_ACTIVITIES =
@@ -151,23 +153,6 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             logFailure("hook EditorActivity.onDestroy", throwable);
         }
 
-        try {
-            XposedHelpers.findAndHookMethod(
-                    editorActivity,
-                    "onPause",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            if (param.thisObject instanceof Activity
-                                    && consumeEditorActivitySharePending(param.thisObject)) {
-                                finishEditorActivityAfterShare((Activity) param.thisObject);
-                            }
-                        }
-                    });
-        } catch (Throwable throwable) {
-            logFailure("hook EditorActivity.onPause", throwable);
-        }
-
         hookDexKitMethod(
                 "Screenshot GalleryStartHelper factory",
                 bindings.galleryFactory,
@@ -190,10 +175,11 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     protected void beforeHookedMethod(MethodHookParam param) {
                         Uri origin = readScreenshotOrigin(param.thisObject, bindings);
                         Object activity = getActionActivity(param.thisObject, bindings);
-                        markEditorActivitySharePending(activity);
-                        if (origin != null && activity != null) {
-                            rememberEditorActivityOrigin(activity, origin);
+                        if (activity != null) {
                             registerEditorActivityReceiver(activity);
+                            if (origin != null) {
+                                rememberEditorActivityOrigin(activity, origin);
+                            }
                         }
                         PENDING_ORIGINS.get().push(new PendingOrigin(origin));
                     }
@@ -244,6 +230,59 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         }
     }
 
+    private static boolean isSelectedShareTargetLaunch(
+            Class<?> screenShotShareActivity,
+            XC_MethodHook.MethodHookParam param) {
+        if (param == null || param.getThrowable() != null
+                || !(param.thisObject instanceof Context)
+                || !screenShotShareActivity.isInstance(param.thisObject)
+                || param.args.length < 2
+                || !(param.args[0] instanceof Intent)
+                || !(param.args[1] instanceof Integer)
+                || ((Integer) param.args[1]).intValue() != -1) {
+            return false;
+        }
+
+        // The Gallery resolver assigns the selected target component before
+        // calling Activity.startActivity(...). This filters out unrelated
+        // lifecycle launches from the share page.
+        return ((Intent) param.args[0]).getComponent() != null;
+    }
+
+    private static XC_MethodHook createShareTargetLaunchHook(
+            final Class<?> screenShotShareActivity) {
+        return new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (isSelectedShareTargetLaunch(screenShotShareActivity, param)) {
+                    notifyScreenshotShareTargetLaunched((Context) param.thisObject);
+                }
+            }
+        };
+    }
+
+    private static void notifyScreenshotShareTargetLaunched(Context galleryActivity) {
+        try {
+            Intent signal = new Intent(ACTION_SHARE_TARGET_LAUNCHED);
+            signal.setPackage(SCREENSHOT_PACKAGE);
+            if (galleryActivity instanceof Activity) {
+                Activity activity = (Activity) galleryActivity;
+                signal.putExtra(EXTRA_SHARE_TASK_ID, activity.getTaskId());
+                Intent source = activity.getIntent();
+                if (source != null) {
+                    String origin = source.getStringExtra(EXTRA_ORIGIN_URI);
+                    if (origin != null) {
+                        signal.putExtra(EXTRA_ORIGIN_URI, origin);
+                    }
+                }
+            }
+            galleryActivity.sendBroadcast(signal);
+            ModuleLog.log("Gallery share target launched; notified Screenshot process");
+        } catch (Throwable throwable) {
+            logFailure("notify Screenshot after Gallery share target launch", throwable);
+        }
+    }
+
     private static void rememberEditorActivityOrigin(Object activity, Uri origin) {
         if (activity == null || origin == null) {
             return;
@@ -270,8 +309,34 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             @Override
             public void onReceive(Context context, Intent intent) {
                 Object target = activityReference.get();
-                if (!(target instanceof Activity) || intent == null
-                        || !ACTION_DELETE_COMPLETE.equals(intent.getAction())) {
+                if (!(target instanceof Activity) || intent == null) {
+                    return;
+                }
+
+                if (ACTION_SHARE_TARGET_LAUNCHED.equals(intent.getAction())) {
+                    String shareOrigin = intent.getStringExtra(EXTRA_ORIGIN_URI);
+                    String expectedOrigin = EDITOR_ACTIVITY_ORIGINS.get(target);
+                    if (shareOrigin != null && expectedOrigin != null
+                            && !shareOrigin.equals(expectedOrigin)) {
+                        return;
+                    }
+                    int shareTaskId = intent.getIntExtra(EXTRA_SHARE_TASK_ID, -1);
+                    if (shareOrigin == null && shareTaskId >= 0) {
+                        try {
+                            if (((Activity) target).getTaskId() != shareTaskId) {
+                                return;
+                            }
+                        } catch (Throwable throwable) {
+                            logFailure("read EditorActivity task id for share signal", throwable);
+                            return;
+                        }
+                    }
+                    ModuleLog.log("share target launched; removing EditorActivity task");
+                    finishEditorActivityAfterTargetLaunch((Activity) target);
+                    return;
+                }
+
+                if (!ACTION_DELETE_COMPLETE.equals(intent.getAction())) {
                     return;
                 }
 
@@ -296,7 +361,9 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         }
 
         try {
-            IntentFilter filter = new IntentFilter(ACTION_DELETE_COMPLETE);
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(ACTION_DELETE_COMPLETE);
+            filter.addAction(ACTION_SHARE_TARGET_LAUNCHED);
             Context context = (Context) activity;
             if (Build.VERSION.SDK_INT >= 33) {
                 context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
@@ -311,7 +378,6 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
     private static void unregisterEditorActivityReceiver(Object activity) {
         EDITOR_ACTIVITY_ORIGINS.remove(activity);
-        EDITOR_ACTIVITY_SHARE_PENDING.remove(activity);
         unregisterEditorActivityDeletionObserver(activity);
         BroadcastReceiver receiver = EDITOR_ACTIVITY_RECEIVERS.remove(activity);
         if (receiver == null || !(activity instanceof Context)) {
@@ -324,17 +390,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void markEditorActivitySharePending(Object activity) {
-        if (activity instanceof Activity) {
-            EDITOR_ACTIVITY_SHARE_PENDING.put(activity, Boolean.TRUE);
-        }
-    }
-
-    private static boolean consumeEditorActivitySharePending(Object activity) {
-        return Boolean.TRUE.equals(EDITOR_ACTIVITY_SHARE_PENDING.remove(activity));
-    }
-
-    private static void finishEditorActivityAfterShare(final Activity editor) {
+    private static void finishEditorActivityAfterTargetLaunch(final Activity editor) {
         if (editor == null) {
             return;
         }
@@ -346,14 +402,14 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 try {
                     taskId = editor.getTaskId();
                 } catch (Throwable throwable) {
-                    logFailure("read EditorActivity task id before share finish", throwable);
+                    logFailure("read EditorActivity task id before target launch finish", throwable);
                 }
 
                 Context application = null;
                 try {
                     application = editor.getApplicationContext();
                 } catch (Throwable throwable) {
-                    logFailure("read Screenshot application context before share finish", throwable);
+                    logFailure("read Screenshot application context before target launch finish", throwable);
                 }
 
                 try {
@@ -364,10 +420,10 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                     excludeAppTaskFromRecents(application, taskId);
                     if (!editor.isFinishing()) {
                         editor.finish();
-                        ModuleLog.log("EditorActivity finish requested after share");
+                        ModuleLog.log("EditorActivity finish requested after share target launch");
                     }
                 } catch (Throwable throwable) {
-                    logFailure("finish EditorActivity after share", throwable);
+                    logFailure("finish EditorActivity after share target launch", throwable);
                 }
 
                 final Context retryContext = application;
@@ -635,7 +691,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
         }
 
         try {
-            Class<?> screenShotShareActivity = Class.forName(
+            final Class<?> screenShotShareActivity = Class.forName(
                     "com.oplus.gallery.sharepage.ScreenShotShareActivity", false, classLoader);
             XposedHelpers.findAndHookMethod(
                     screenShotShareActivity,
@@ -650,8 +706,21 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                             updateCurrentGalleryOrigin(intent);
                         }
                     });
+            XposedHelpers.findAndHookMethod(
+                    Activity.class,
+                    "startActivityForResult",
+                    Intent.class,
+                    int.class,
+                    createShareTargetLaunchHook(screenShotShareActivity));
+            XposedHelpers.findAndHookMethod(
+                    Activity.class,
+                    "startActivityForResult",
+                    Intent.class,
+                    int.class,
+                    Bundle.class,
+                    createShareTargetLaunchHook(screenShotShareActivity));
         } catch (Throwable throwable) {
-            logFailure("hook ScreenShotShareActivity.onNewIntent", throwable);
+            logFailure("hook ScreenShotShareActivity share target launch", throwable);
         }
 
         hookDexKitMethod(
