@@ -3,6 +3,10 @@ name: Build and publish pre-release
 on:
   push:
 
+concurrency:
+  group: deleteaftershare-pre-release
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -40,13 +44,13 @@ jobs:
 
           signing_dir="$RUNNER_TEMP/deleteaftershare-signing"
           mkdir -p "$signing_dir"
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$signing_dir/release.p12"
-          chmod 600 "$signing_dir/release.p12"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$signing_dir/release.jks"
+          chmod 600 "$signing_dir/release.jks"
 
-          test -s "$signing_dir/release.p12"
+          test -s "$signing_dir/release.jks"
           {
-            echo "RELEASE_STORE_FILE=$signing_dir/release.p12"
-            echo "RELEASE_STORE_TYPE=pkcs12"
+            echo "RELEASE_STORE_FILE=$signing_dir/release.jks"
+            echo "RELEASE_STORE_TYPE=jks"
             echo "RELEASE_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
             echo "RELEASE_KEY_ALIAS=$ANDROID_KEY_ALIAS"
             echo "RELEASE_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
