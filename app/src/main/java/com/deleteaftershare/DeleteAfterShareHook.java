@@ -1,15 +1,20 @@
 package com.deleteaftershare;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.content.BroadcastReceiver;
 import android.content.ContentUris;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.database.ContentObserver;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
@@ -21,6 +26,7 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.AndroidAppHelper;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
@@ -49,6 +55,8 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             Collections.synchronizedMap(new WeakHashMap<Object, Uri>());
     private static final Map<Object, BroadcastReceiver> EDITOR_ACTIVITY_RECEIVERS =
             Collections.synchronizedMap(new WeakHashMap<Object, BroadcastReceiver>());
+    private static final Map<Object, ContentObserver> EDITOR_ACTIVITY_OBSERVERS =
+            Collections.synchronizedMap(new WeakHashMap<Object, ContentObserver>());
     private static final Map<Object, String> EDITOR_ACTIVITY_ORIGINS =
             Collections.synchronizedMap(new WeakHashMap<Object, String>());
     private static final Map<Object, String> GALLERY_MODEL_ORIGINS =
@@ -222,6 +230,9 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             return;
         }
         EDITOR_ACTIVITY_ORIGINS.put(activity, origin.toString());
+        if (activity instanceof Activity) {
+            registerEditorActivityDeletionObserver((Activity) activity, origin);
+        }
     }
 
     private static void registerEditorActivityReceiver(final Object activity) {
@@ -253,10 +264,8 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
                 }
 
                 Activity editor = (Activity) target;
-                if (!editor.isFinishing()) {
-                    ModuleLog.log("both images deleted; removing EditorActivity task");
-                    editor.finishAndRemoveTask();
-                }
+                ModuleLog.log("both images deleted; removing EditorActivity task");
+                removeEditorActivityTask(editor);
             }
         };
 
@@ -283,6 +292,7 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
     private static void unregisterEditorActivityReceiver(Object activity) {
         EDITOR_ACTIVITY_ORIGINS.remove(activity);
+        unregisterEditorActivityDeletionObserver(activity);
         BroadcastReceiver receiver = EDITOR_ACTIVITY_RECEIVERS.remove(activity);
         if (receiver == null || !(activity instanceof Context)) {
             return;
@@ -291,6 +301,171 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
             ((Context) activity).unregisterReceiver(receiver);
         } catch (Throwable throwable) {
             logFailure("unregister EditorActivity completion receiver", throwable);
+        }
+    }
+
+    private static void registerEditorActivityDeletionObserver(
+            final Activity activity, final Uri origin) {
+        if (activity == null || origin == null || !isMediaUri(origin)) {
+            return;
+        }
+
+        ContentObserver previous = EDITOR_ACTIVITY_OBSERVERS.remove(activity);
+        if (previous != null) {
+            try {
+                activity.getContentResolver().unregisterContentObserver(previous);
+            } catch (Throwable ignored) {
+                // The previous observer may already be detached with the
+                // Activity's content resolver.
+            }
+        }
+
+        final WeakReference<Activity> activityReference =
+                new WeakReference<Activity>(activity);
+        ContentObserver observer = new ContentObserver(new Handler(Looper.getMainLooper())) {
+            @Override
+            public void onChange(boolean selfChange, Uri changedUri) {
+                final Activity target = activityReference.get();
+                if (target == null) {
+                    return;
+                }
+
+                // MediaProvider can deliver an update before the recycle
+                // transaction is fully visible. Recheck after it settles.
+                new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isMediaStoreRowMissing(target, origin)) {
+                            ModuleLog.log("original screenshot deleted; removing EditorActivity task");
+                            removeEditorActivityTask(target);
+                        }
+                    }
+                }, 150L);
+            }
+        };
+
+        EDITOR_ACTIVITY_OBSERVERS.put(activity, observer);
+        try {
+            ContentResolver resolver = activity.getContentResolver();
+            resolver.registerContentObserver(origin, true, observer);
+        } catch (Throwable throwable) {
+            EDITOR_ACTIVITY_OBSERVERS.remove(activity);
+            logFailure("register EditorActivity media deletion observer", throwable);
+        }
+    }
+
+    private static void unregisterEditorActivityDeletionObserver(Object activity) {
+        ContentObserver observer = EDITOR_ACTIVITY_OBSERVERS.remove(activity);
+        if (observer == null || !(activity instanceof Activity)) {
+            return;
+        }
+        try {
+            ((Activity) activity).getContentResolver().unregisterContentObserver(observer);
+        } catch (Throwable throwable) {
+            logFailure("unregister EditorActivity media deletion observer", throwable);
+        }
+    }
+
+    private static boolean isMediaStoreRowMissing(Activity activity, Uri origin) {
+        Cursor cursor = null;
+        try {
+            cursor = activity.getContentResolver().query(
+                    origin, new String[]{"_id"}, null, null, null);
+            return cursor != null && !cursor.moveToFirst();
+        } catch (Throwable ignored) {
+            // A transient provider or permission failure is not proof of
+            // deletion; wait for the Gallery completion path instead.
+            return false;
+        } finally {
+            if (cursor != null) {
+                try {
+                    cursor.close();
+                } catch (Throwable ignored) {
+                    // Ignore a vendor cursor close failure.
+                }
+            }
+        }
+    }
+
+    private static void removeEditorActivityTask(final Activity editor) {
+        if (editor == null) {
+            return;
+        }
+
+        Runnable removal = new Runnable() {
+            @Override
+            public void run() {
+                int taskId = -1;
+                try {
+                    taskId = editor.getTaskId();
+                } catch (Throwable throwable) {
+                    logFailure("read EditorActivity task id", throwable);
+                }
+
+                Context application = null;
+                try {
+                    application = editor.getApplicationContext();
+                } catch (Throwable throwable) {
+                    logFailure("read Screenshot application context", throwable);
+                }
+
+                // Ask ActivityManager to remove the owning task as well as
+                // finishing the Activity token. This covers OEM task stacks
+                // that keep a finished document task in Recents.
+                removeAppTask(application, taskId);
+                try {
+                    editor.finishAndRemoveTask();
+                    ModuleLog.log("EditorActivity finishAndRemoveTask requested, taskId="
+                            + taskId);
+                } catch (Throwable throwable) {
+                    logFailure("finish and remove EditorActivity task", throwable);
+                }
+
+                // The first ActivityManager request can race the task-stack
+                // update. Retry once after the finish request has propagated.
+                final Context retryContext = application;
+                final int retryTaskId = taskId;
+                new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        removeAppTask(retryContext, retryTaskId);
+                    }
+                }, 200L);
+            }
+        };
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            removal.run();
+        } else {
+            editor.runOnUiThread(removal);
+        }
+    }
+
+    private static void removeAppTask(Context context, int taskId) {
+        if (context == null || taskId < 0) {
+            return;
+        }
+        try {
+            ActivityManager activityManager = (ActivityManager) context.getSystemService(
+                    Context.ACTIVITY_SERVICE);
+            if (activityManager == null) {
+                return;
+            }
+            List<ActivityManager.AppTask> tasks = activityManager.getAppTasks();
+            if (tasks == null) {
+                return;
+            }
+            for (ActivityManager.AppTask task : tasks) {
+                ActivityManager.RecentTaskInfo info = task.getTaskInfo();
+                if (info != null && info.id == taskId) {
+                    task.finishAndRemoveTask();
+                    ModuleLog.log("ActivityManager removed EditorActivity task, taskId="
+                            + taskId);
+                    return;
+                }
+            }
+        } catch (Throwable throwable) {
+            logFailure("remove EditorActivity task from ActivityManager", throwable);
         }
     }
 
@@ -809,22 +984,24 @@ public final class DeleteAfterShareHook implements IXposedHookLoadPackage {
 
     private static void notifyScreenshotDeletionComplete(
             Uri originUri, DexKitResolver.GalleryBindings bindings) {
-        if (bindings.appContext == null) {
-            return;
-        }
         try {
-            Object contextValue = bindings.appContext.field.get(null);
-            Context application = contextValue instanceof Context
-                    ? ((Context) contextValue).getApplicationContext()
-                    : null;
-            if (application == null && contextValue instanceof Context) {
-                application = (Context) contextValue;
+            Context application = AndroidAppHelper.currentApplication();
+            if (application == null && bindings.appContext != null) {
+                Object contextValue = bindings.appContext.field.get(null);
+                application = contextValue instanceof Context
+                        ? ((Context) contextValue).getApplicationContext()
+                        : null;
+                if (application == null && contextValue instanceof Context) {
+                    application = (Context) contextValue;
+                }
             }
             if (application == null || originUri == null) {
+                ModuleLog.warning("cannot notify Screenshot: Gallery application context unavailable");
                 return;
             }
             Intent intent = new Intent(ACTION_DELETE_COMPLETE);
             intent.setPackage(SCREENSHOT_PACKAGE);
+            intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
             intent.putExtra(EXTRA_DELETE_ORIGIN, originUri.toString());
             application.sendBroadcast(intent);
             ModuleLog.log("deletion completion sent to Screenshot");
